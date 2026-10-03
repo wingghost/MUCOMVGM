@@ -4,20 +4,19 @@ MUCOM88 形式の MML を、YM2608 用の VGM に変換するコンパイラで�
 
 PC-8801 の MUCOM88 / MUCOM88win 向けに書いた MML を、MDPlayer などで鳴らせる VGM にするのが目的です。FM 6音、SSG、リズム、ADPCM に対応しています。
 
-完全な互換ではありません。F-num は 11bit で正規化しており、MUCOM88 の 8bit のままでは扱いません。既存の MML を変換して、普通に演奏できることを目標にしています。
-
-## 必要なもの
-
-- Python 3.10 以降
-- 追加のパッケージは不要です
+完全な互換ではありません。
 
 ## 使い方
 
-python mucomvgm.py song.muc
+mucomvgm.exe song.muc
 
 同じフォルダに `song.vgm` ができます。出力名を指定する場合は次です。
 
-python mucomvgm.py song.muc out.vgm
+mucomvgm.exe song.muc out.vgm
+
+プリセットの音色ファイルを使う場合は、`.muc` と同じフォルダに VOICE ファイルを置きます。
+
+#voice voice.dat
 
 ADPCM を使う曲は、`.muc` と同じフォルダに PCM ファイルを置きます。
 
@@ -32,23 +31,28 @@ pcmlist.txt の中身は、番号とファイル名です。
 1 kick.wav  
 2 snare.wav  
 
-WAV は 16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
+WAV は 16kHz/16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
 
-## ファイル
+## 既存のMUCOM88のMMLと仕様が違うところ
 
-- `mucomvgm.py` 起動
-- `mmlparser.py` MML の解析
-- `driver.py` 演奏データの生成
-- `vgmwriter.py` VGM の書き出し
-- `adpcm.py` ADPCM の読み込み
-- `chips/opn.py` YM2608 の FM
-- `chips/ay8910.py` SSG
+l%      前にスペースが入っている「 %」と同等です。クロック単位での音長設定。
+{cd}    ポルタメント。{c>>>c}などとオクターブを超えが可能に。
+@1      音色パラメーターのキャリアのTLが反映される。
+
+## 新しく実装されたコマンド
+
+v%      TL値の 127～0 でボリュームを設定。 v% 後に設定された()は、TL値で増減。
+Q       8分割のスタッカート。Q8はq0と同等。
 
 ## ライセンス
 
 MIT License。詳細は LICENSE を見てください。
 
 ## 更新履歴
+
+2026/10/03 Ver.0.0.3  
+    - エラーメッセージを修正
+    - コンパイル時のメッセージを修正
 
 2026/10/03 Ver.0.0.2  
     - &のバグを修正

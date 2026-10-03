@@ -69,6 +69,7 @@ class PartState:
     transpose: int = 0
     clock_c: int = DEFAULT_C
     total_clocks: int = 0
+    marks: list = field(default_factory=lambda: [(0, 0)])
     vol_mode: str = "v"
     volume_v: int = 15
     volume_fine: int = 127
@@ -113,6 +114,7 @@ class Song:
     voices: dict[int, tuple] = field(default_factory=dict)
     ssg_presets: dict[int, SsgPreset] = field(default_factory=dict)
     part_clocks: dict[str, int] = field(default_factory=dict)
+    part_loop_clocks: dict[str, int] = field(default_factory=dict)
     loop_tick: int | None = None
     lfo_enable: int = 0
     lfo_speed: int = 0
@@ -547,6 +549,7 @@ def parse_part_mml(song, part, mml, state):
         emit_note_tail(duration, note, gen)
         total_clocks += duration * clock_c // INTERNAL_WHOLE
         tick += duration
+        state.marks.append((tick, total_clocks))
         apply_volume_delta(max(0, echo_drop))
 
     def parse_range(start, end):
@@ -605,6 +608,7 @@ def parse_part_mml(song, part, mml, state):
                         remember(end_note, duration)
                         pending_tie = False
                 tick += duration
+                state.marks.append((tick, total_clocks))
             elif c in "\\¥":
                 if i + 1 < end and mml[i + 1] == "=":
                     echo_back, k = read_imm(mml, i + 2, end, 1)
@@ -900,6 +904,7 @@ def parse_part_mml(song, part, mml, state):
                             remember(note, duration)
                             tie_note = None
                 tick += duration
+                state.marks.append((tick, total_clocks))
             i += 1
 
     parse_range(0, len(mml))
@@ -948,6 +953,16 @@ def take_ssg_preset(lines, i, no):
         buf.append(row)
         i += 1
     raise ValueError(f"SSG音色 @{no} の '}}' がありません")
+
+
+def clocks_at_tick(marks: list, tick: int) -> int:
+    # marks = [(tick, 累計クロック), ...]。tick が音符の途中なら、その音符の中を比例配分する
+    prev = marks[0]
+    for cur in marks:
+        if cur[0] > tick:
+            return prev[1] + (cur[1] - prev[1]) * (tick - prev[0]) // (cur[0] - prev[0])
+        prev = cur
+    return prev[1]
 
 
 def parse_mml(text: str, folder: Path | None = None) -> Song:
@@ -1030,6 +1045,8 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         raise ValueError(f"{part}: ループの ']' がありません")
     for part, st in states.items():
         song.part_clocks[part] = st.total_clocks
+        if song.loop_tick is not None:
+            song.part_loop_clocks[part] = st.total_clocks - clocks_at_tick(st.marks, song.loop_tick)
         if st.pending_tie or st.rev_on:
             song.events.append(MusicEvent("note_off", st.tick, part=part, aux=10**9))
     end = max((s.tick for s in states.values()), default=0)
