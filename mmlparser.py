@@ -880,9 +880,11 @@ def parse_part_mml(song, part, mml, state):
                         if tied:
                             pending_tie = True
                         else:
+                            n_before = len(song.events)
                             emit_note_tail(tie_dur, note, tie_gen)
                             # note_off must be measured from the first note, not this one
-                            off = [e for e in song.events if e.part == part and e.kind in ("note_off", "rev_tail") and e.aux == tie_gen]
+                            # (今回 emit_note_tail が追加したイベントだけを対象にする)
+                            off = [e for e in song.events[n_before:] if e.part == part and e.kind in ("note_off", "rev_tail") and e.aux == tie_gen]
                             for e in off[-2:]:
                                 e.tick = tie_origin + (e.tick - tick)
                             remember(note, tie_dur)
