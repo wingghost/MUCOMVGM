@@ -1,54 +1,54 @@
 # MUCOMVGM
 
-MUCOM88 �`���� MML ���AYM2608 �p�� VGM �ɕϊ�����R���p�C���ł��B
+MUCOM88 形式の MML を、YM2608 用の VGM に変換するコンパイラです。
 
-PC-8801 �� MUCOM88 / MUCOM88win �����ɏ����� MML ���AMDPlayer �ȂǂŖ点�� VGM �ɂ���̂��ړI�ł��BFM 6���ASSG�A���Y���AADPCM �ɑΉ����Ă��܂��B
+PC-8801 の MUCOM88 / MUCOM88win 向けに書いた MML を、MDPlayer などで鳴らせる VGM にするのが目的です。FM 6音、SSG、リズム、ADPCM に対応しています。
 
-���S�Ȍ݊��ł͂���܂���BF-num �� 11bit �Ő��K�����Ă���AMUCOM88 �� 8bit �̂܂܂ł͈����܂���B������ MML ��ϊ����āA���ʂɉ��t�ł��邱�Ƃ�ڕW�ɂ��Ă��܂��B
+完全な互換ではありません。F-num は 11bit で正規化しており、MUCOM88 の 8bit のままでは扱いません。既存の MML を変換して、普通に演奏できることを目標にしています。
 
-## �K�v�Ȃ���
+## 必要なもの
 
-- Python 3.10 �ȍ~
-- �ǉ��̃p�b�P�[�W�͕s�v�ł�
+- Python 3.10 以降
+- 追加のパッケージは不要です
 
-## �g����
+## 使い方
 
 python mucomvgm.py song.muc
 
-�����t�H���_�� `song.vgm` ���ł��܂��B�o�͖����w�肷��ꍇ�͎��ł��B
+同じフォルダに `song.vgm` ができます。出力名を指定する場合は次です。
 
 python mucomvgm.py song.muc out.vgm
 
-ADPCM ���g���Ȃ́A`.muc` �Ɠ����t�H���_�� PCM �t�@�C����u���܂��B
+ADPCM を使う曲は、`.muc` と同じフォルダに PCM ファイルを置きます。
 
 #pcm mucompcm.bin
 
-�V�K�� WAV ���g���ꍇ�́A���X�g�������܂��B�ԍ��� 1 ���� 32 �ł��B
+新規の WAV を使う場合は、リストを書きます。番号は 1 から 32 です。
 
 #pcmlist pcmlist.txt
 
-pcmlist.txt �̒��g�́A�ԍ��ƃt�@�C�����ł��B
+pcmlist.txt の中身は、番号とファイル名です。
 
-1 kick.wav
-2 snare.wav
+1 kick.wav  
+2 snare.wav  
 
-WAV �� 16bit ���m�����ł��B16kHz �ȊO�͕ϊ����� 16kHz �֍��킹�܂��B
+WAV は 16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
 
-## �t�@�C��
+## ファイル
 
-- `mucomvgm.py` �N��
-- `mmlparser.py` MML �̉��
-- `driver.py` ���t�f�[�^�̐���
-- `vgmwriter.py` VGM �̏����o��
-- `adpcm.py` ADPCM �̓ǂݍ���
-- `chips/opn.py` YM2608 �� FM
+- `mucomvgm.py` 起動
+- `mmlparser.py` MML の解析
+- `driver.py` 演奏データの生成
+- `vgmwriter.py` VGM の書き出し
+- `adpcm.py` ADPCM の読み込み
+- `chips/opn.py` YM2608 の FM
 - `chips/ay8910.py` SSG
 
-## ���C�Z���X
+## ライセンス
 
-MIT License�B�ڍׂ� LICENSE �����Ă��������B
+MIT License。詳細は LICENSE を見てください。
 
-## �X�V����
+## 更新履歴
 
-2026/10/03 Ver.0.0.1
-    - ���񃊃��[�X
+2026/10/03 Ver.0.0.1  
+    - 初回リリース
