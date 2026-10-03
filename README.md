@@ -46,7 +46,7 @@ Q       8分割のスタッカート。Q8はq0と同等。
 
 ## ライセンス
 
-MIT License。詳細は LICENSE を見てください。
+MIT License。詳細は LICENSE.txt を見てください。
 
 ## 更新履歴
 
