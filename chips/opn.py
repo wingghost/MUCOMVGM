@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-FM_PARTS = "ABCHIJ"
+FM_PARTS = "ABCHIJLMN"
+FM3_PARTS = "CLMN"
+EXT_PARTS = "LMN"
 FNUM_MAX = 2047
 PORTA_HZ = 200
 SAMPLE_RATE = 44100
@@ -8,10 +10,11 @@ FNUM_TABLE = [617, 653, 692, 733, 777, 823, 872, 924, 979, 1037, 1099, 1164]
 SLOT_MAP = {
     "A": (0, 8, 4, 12), "B": (1, 9, 5, 13), "C": (2, 10, 6, 14),
     "H": (0, 8, 4, 12), "I": (1, 9, 5, 13), "J": (2, 10, 6, 14),
+    "L": (2, 10, 6, 14), "M": (2, 10, 6, 14), "N": (2, 10, 6, 14),
 }
-REG_CH = {"A": 0, "B": 1, "C": 2, "H": 0, "I": 1, "J": 2}
-KEY_CH = {"A": 0, "B": 1, "C": 2, "H": 4, "I": 5, "J": 6}
-PORT = {"A": 0, "B": 0, "C": 0, "H": 1, "I": 1, "J": 1}
+REG_CH = {"A": 0, "B": 1, "C": 2, "H": 0, "I": 1, "J": 2, "L": 2, "M": 2, "N": 2}
+KEY_CH = {"A": 0, "B": 1, "C": 2, "H": 4, "I": 5, "J": 6, "L": 2, "M": 2, "N": 2}
+PORT = {"A": 0, "B": 0, "C": 0, "H": 1, "I": 1, "J": 1, "L": 0, "M": 0, "N": 0}
 CARRIERS = {0: (3,), 1: (3,), 2: (3,), 3: (3,), 4: (1, 3), 5: (1, 2, 3), 6: (1, 2, 3), 7: (0, 1, 2, 3)}
 PAN_LR = {0: 0x00, 1: 0x40, 2: 0x80, 3: 0xC0}
 V_TL_TABLE = [42, 40, 37, 34, 32, 29, 26, 24, 21, 18, 16, 13, 10, 8, 5, 2]
@@ -66,7 +69,7 @@ def write_b4(vgm, part, pan, pms, ams) -> None:
     vgm.write_ym2608(PORT[part], 0xB4 + REG_CH[part], val)
 
 
-def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx) -> None:
+def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx, ops=0xF) -> None:
     if voice_id not in voices:
         raise ValueError(f"音色 @{voice_id} が定義されていません")
     alg, fb, slots = voices[voice_id]
@@ -74,10 +77,12 @@ def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, am
     vgm.write_ym2608(port, 0xB0 + ch, (clamp(fb, 0, 7) << 3) | clamp(alg, 0, 7))
     write_b4(vgm, part, pan, pms, ams)
     tl_add = 127 - clamp(volume, 0, 127) if vol_mode == "V" else V_TL_TABLE[clamp(volume, 0, 15)]
-    carriers = set(CARRIERS.get(clamp(alg, 0, 7), (3,)))
+    carriers = set(CARRIERS.get(clamp(alg, 0, 7), (3,))) & {i for i in range(4) if (ops >> i) & 1}
     carrier_idx.clear()
     carrier_idx.update(carriers)
     for index, slot in enumerate(SLOT_MAP[part]):
+        if not (ops >> index) & 1:
+            continue
         dtml, tl, ar, dr, sr, slrr = slots[index]
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl
@@ -128,24 +133,45 @@ def write_pitch(vgm, part, midi_note, detune) -> None:
     write_fnum(vgm, part, *block_fnum(midi_note, detune))
 
 
-def write_ch3_slots(vgm, midi_note, extra, slot_dt) -> None:
-    for dt, (hi, lo) in zip(slot_dt, CH3_FREQ):
+def write_ch3_slots(vgm, midi_note, extra, slot_dt, ops=0xF) -> None:
+    for index, (dt, (hi, lo)) in enumerate(zip(slot_dt, CH3_FREQ)):
+        if not (ops >> index) & 1:
+            continue
         block, fnum = block_fnum(midi_note, extra + dt)
         vgm.write_ym2608(0, hi, (block << 3) | ((fnum >> 8) & 7))
         vgm.write_ym2608(0, lo, fnum & 0xFF)
 
 
-def key_on(vgm, part, midi_note, detune, legato=False, effect=False, slot_dt=None) -> None:
-    if effect and part == "C":
-        write_ch3_slots(vgm, midi_note, detune, slot_dt or [0, 0, 0, 0])
+def write_ch3_porta(vgm, start_note, end_note, extra, slot_dt, step, total, ops=0xF) -> None:
+    for index, (dt, (hi, lo)) in enumerate(zip(slot_dt, CH3_FREQ)):
+        if not (ops >> index) & 1:
+            continue
+        start = scaled_pitch(start_note, extra + dt)
+        end = scaled_pitch(end_note, extra + dt)
+        block, fnum = split_pitch(start + (end - start) * step // max(1, total))
+        vgm.write_ym2608(0, hi, (block << 3) | ((fnum >> 8) & 7))
+        vgm.write_ym2608(0, lo, fnum & 0xFF)
+
+
+def key_on(vgm, part, midi_note, detune, legato=False, effect=False, slot_dt=None, ops=0xF, kon=None) -> None:
+    if effect and part in FM3_PARTS:
+        write_ch3_slots(vgm, midi_note, detune, slot_dt or [0, 0, 0, 0], ops)
     else:
         write_pitch(vgm, part, midi_note, detune)
     if not legato:
-        vgm.write_ym2608(0, 0x28, 0xF0 | KEY_CH[part])
+        if kon is None:
+            vgm.write_ym2608(0, 0x28, 0xF0 | KEY_CH[part])
+        else:
+            kon[0] |= ops
+            vgm.write_ym2608(0, 0x28, (kon[0] << 4) | KEY_CH[part])
 
 
-def key_off(vgm, part) -> None:
-    vgm.write_ym2608(0, 0x28, KEY_CH[part])
+def key_off(vgm, part, ops=0xF, kon=None) -> None:
+    if kon is None:
+        vgm.write_ym2608(0, 0x28, KEY_CH[part])
+    else:
+        kon[0] &= ~ops & 0xF
+        vgm.write_ym2608(0, 0x28, (kon[0] << 4) | KEY_CH[part])
 
 
 def porta_linear(note: int, detune: int) -> int:

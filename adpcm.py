@@ -5,6 +5,7 @@ from pathlib import Path
 
 PCM_SLOTS = 32
 PCM_INFO = 0x400
+PCM_ADDR_UNIT = 4
 PCMNMB = (
     0x49BA + 0x200, 0x4E1C + 0x200, 0x52C1 + 0x200, 0x57AD + 0x200,
     0x5CE4 + 0x200, 0x626A + 0x200, 0x6844 + 0x200, 0x6E77 + 0x200,
@@ -30,7 +31,7 @@ def parse_mucompcm(data: bytes) -> tuple[dict[int, tuple[int, int, int]], bytes]
         if n + 1 < len(found):
             end = max(start, found[n + 1][1] - 1)
         else:
-            end = max(start, start + max(1, length >> 5) - 1)
+            end = max(start, start + max(1, (length + PCM_ADDR_UNIT - 1) // PCM_ADDR_UNIT) - 1)
         slots[i + 1] = (start, end, vol)
     return slots, data[PCM_INFO:]
 
@@ -38,7 +39,7 @@ def parse_mucompcm(data: bytes) -> tuple[dict[int, tuple[int, int, int]], bytes]
 def load_pcm(folder: Path, name: str) -> tuple[dict[int, tuple[int, int, int]], bytes]:
     path = folder / name
     if not path.is_file():
-        raise ValueError(f"PCMファイルがありません: {path}")
+        return {}, b""
     return parse_mucompcm(path.read_bytes())
 
 
@@ -111,7 +112,7 @@ def encode_adpcm(samples: list[int]) -> bytes:
 def append_pcm(slots, rom, folder: Path, list_name: str) -> None:
     path = folder / list_name
     if not path.is_file():
-        raise ValueError(f"PCMリストがありません: {path}")
+        return
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split(";", 1)[0].strip()
         if not line:
@@ -122,17 +123,19 @@ def append_pcm(slots, rom, folder: Path, list_name: str) -> None:
             raise ValueError(f"PCM @{no} は 1～32 です")
         src = folder / name
         if not src.is_file():
-            raise ValueError(f"PCMファイルがありません: {src}")
+            continue
         payload = src.read_bytes() if src.suffix.lower() != ".wav" else encode_adpcm(resample(*read_wav(src)))
-        start = (len(rom) + 31) // 32
-        rom.extend(b"\x00" * (start * 32 - len(rom)))
+        start = (len(rom) + PCM_ADDR_UNIT - 1) // PCM_ADDR_UNIT
+        rom.extend(b"\x00" * (start * PCM_ADDR_UNIT - len(rom)))
         rom.extend(payload)
-        slots[no] = (start, max(start, ((len(rom) + 31) // 32) - 1), 255)
+        rom.extend(b"\x00" * (-len(rom) % PCM_ADDR_UNIT))
+        slots[no] = (start, max(start, len(rom) // PCM_ADDR_UNIT - 1), 255)
 
 
 def load_song_pcm(folder: Path, pcm_file: str, pcm_list: str):
-    slots, rom = load_pcm(folder, pcm_file) if pcm_file else ({}, b"")
-    buf = bytearray(rom)
+    if pcm_file:
+        return load_pcm(folder, pcm_file)
+    slots, buf = {}, bytearray()
     if pcm_list:
         append_pcm(slots, buf, folder, pcm_list)
     return slots, bytes(buf)
@@ -145,6 +148,25 @@ def delta_n(note: int, detune: int) -> int:
     return max(1, min(0xFFFF, rate))
 
 
+def trim_pcm(slots: dict, rom: bytes, used: set):
+    # 再生される番号のデータだけを詰め直す。アドレスの単位は 4 バイト (1bit DRAM モード)。
+    # 開始/終了が同じスロットは 1 つにまとめる。
+    new_slots, buf, placed = {}, bytearray(), {}
+    for no in sorted(used):
+        if no not in slots:
+            continue
+        start, end, base = slots[no]
+        if (start, end) not in placed:
+            size = (end - start + 1) * PCM_ADDR_UNIT
+            chunk = rom[start * PCM_ADDR_UNIT:(end + 1) * PCM_ADDR_UNIT].ljust(size, b"\x00")
+            new_start = len(buf) // PCM_ADDR_UNIT
+            buf.extend(chunk)
+            placed[(start, end)] = (new_start, new_start + end - start)
+        new_start, new_end = placed[(start, end)]
+        new_slots[no] = (new_start, new_end, base)
+    return new_slots, bytes(buf)
+
+
 def write_rom(vgm, rom: bytes) -> None:
     if not rom:
         return
@@ -153,7 +175,7 @@ def write_rom(vgm, rom: bytes) -> None:
 
 
 def play(vgm, start: int, end: int, rate: int, volume: int, pan: int) -> None:
-    pan_bits = (0x00, 0x80, 0x40, 0xC0)[pan & 3]
+    pan_bits = (0x00, 0x40, 0x80, 0xC0)[pan & 3]
     vgm.write_ym2608(1, 0x00, 0x01)
     vgm.write_ym2608(1, 0x01, pan_bits)
     vgm.write_ym2608(1, 0x02, start & 0xFF)

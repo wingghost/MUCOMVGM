@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from adpcm import delta_n, play, set_rate, stop, write_rom
+from adpcm import delta_n, play, set_rate, stop, trim_pcm, write_rom
 from chips.ay8910 import AyState, SSG_CH, SSG_PARTS, ssg_clock, tone_period
 from chips.opn import (
-    FM_PARTS, PORT, SLOT_MAP, apply_voice, init_fm, key_off, key_on, write_b4,
-    scaled_pitch, split_pitch, write_ch3_slots, write_fnum, write_pitch,
+    CARRIERS, FM3_PARTS, FM_PARTS, PORT, REG_CH, SLOT_MAP, apply_voice, init_fm, key_off, key_on, write_b4,
+    scaled_pitch, split_pitch, write_ch3_porta, write_ch3_slots, write_fnum, write_pitch,
 )
-from mmlparser import ADPCM_PART, ALL_PARTS, MOD_PARTS, RHYTHM_PART, MusicEvent, Song, fm_reverb_volume, fine_reverb_volume
+from mmlparser import ADPCM_PART, ALL_PARTS, MOD_PARTS, RHYTHM_PART, MusicEvent, Song, fm_reverb_volume, fine_reverb_volume, ssg_reverb_volume
 from vgmwriter import DEFAULT_C, INTERNAL_WHOLE, VgmWriter, clamp, ticks_to_samples
 
 RHYTHM_REG = (0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D)
@@ -65,10 +65,21 @@ def step_env(st):
     return True
 
 
+def used_pcm_numbers(events) -> set:
+    used, voice = set(), 1
+    for ev in sorted(events, key=lambda e: (e.tick, e.kind != "pcm")):
+        if ev.kind == "pcm":
+            voice = ev.value
+        elif ev.part == ADPCM_PART and ev.kind in ("note_on", "porta_on", "porta"):
+            used.add(voice)
+    return used
+
+
 def compile_song(song: Song) -> bytes:
     vgm = VgmWriter(song.chip, song.chip_clock)
     init_fm(vgm)
-    write_rom(vgm, song.pcm_rom)
+    pcm_slots, pcm_rom = trim_pcm(song.pcm_slots, song.pcm_rom, used_pcm_numbers(song.events))
+    write_rom(vgm, pcm_rom)
     ay = AyState(ssg_clock(song.chip, song.chip_clock))
     tempo, tempo_mode, timer_b, clock_c = 120, "T", 150, DEFAULT_C
     voice = {p: 1 for p in FM_PARTS}
@@ -86,7 +97,7 @@ def compile_song(song: Song) -> bytes:
     lfo = {p: new_mod_state() for p in MOD_PARTS}
     trem = {p: new_mod_state() for p in MOD_PARTS}
     env = {p: new_env() for p in SSG_PARTS}
-    rev = {p: {"on": False, "val": 0, "mode": 1, "tail": False} for p in ALL_PARTS}
+    rev = {p: {"on": False, "val": 0, "mode": 1, "tail": False, "vol": 0} for p in ALL_PARTS}
     held = {p: None for p in ALL_PARTS}
     note_gen = {p: 0 for p in ALL_PARTS}
     hw_env = {p: False for p in SSG_PARTS}
@@ -96,7 +107,16 @@ def compile_song(song: Song) -> bytes:
     rhythm_inst = [31, 31, 31, 31, 31, 31]
     rhythm_pan = [3, 3, 3, 3, 3, 3]
     pcm_voice, pcm_pan, pcm_vm, pcm_bias = 1, 3, False, 0
-    slot_dt, effect, last_tick = [0, 0, 0, 0], False, 0
+    slot_dt, last_tick = [0, 0, 0, 0], 0
+    ext_mode = song.chip == "ym2608" and any(ev.kind == "slot_dt" or (ev.kind == "ex" and ev.value != 0xF) for ev in song.events)
+    ex_ops = {p: 0xF for p in FM3_PARTS}
+    key_ops = {p: 0xF for p in FM3_PARTS}
+    kon = [0]
+
+    def fm3_args(part):
+        if part in FM3_PARTS:
+            return ext_mode, slot_dt if part == "C" else [0, 0, 0, 0], key_ops[part]
+        return False, None, 0xF
 
     def write_rhythm_levels():
         vgm.write_ym2608(0, 0x11, clamp(rhythm_total, 0, 63))
@@ -104,6 +124,9 @@ def compile_song(song: Song) -> bytes:
             vgm.write_ym2608(0, reg, RHYTHM_PAN[rhythm_pan[i]] | clamp(rhythm_inst[i], 0, 31))
 
     def ssg_out_vol(part):
+        if rev[part]["tail"]:
+            ay.set_volume(SSG_CH[part], rev[part]["vol"])
+            return
         if hw_env[part]:
             vgm.write_ssg(8 + SSG_CH[part], 0x10)
             return
@@ -132,9 +155,12 @@ def compile_song(song: Song) -> bytes:
         flush_ssg(vgm, ay)
 
     def refresh_voice(part, vol_override=None):
-        if part not in FM_PARTS or voice[part] not in song.voices:
+        vp = "C" if part in FM3_PARTS else part
+        if part not in FM_PARTS or voice[vp] not in song.voices:
             return
-        apply_voice(vgm, part, voice[part], volume[part] if vol_override is None else vol_override, song.voices, pan[part], vol_mode[part], pms[part], ams[part], amon[part], base_tl[part], carrier_idx[part])
+        if part in FM3_PARTS and part != "C" and ex_ops[part] == 0xF:
+            return
+        apply_voice(vgm, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan[vp], vol_mode[part], pms[vp], ams[vp], amon[vp], base_tl[part], carrier_idx[part], (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF)
         off = trem[part]["offset"] if trem[part]["on"] else 0
         for index, slot in enumerate(SLOT_MAP[part]):
             if index in carrier_idx[part]:
@@ -161,14 +187,45 @@ def compile_song(song: Song) -> bytes:
         st["offset"] += st["delta"]
         return True
 
+    seq_of = {id(e): n for n, e in enumerate(song.events)}
+    lock_seq = {}
+    ssg_port = 0 if song.chip == "ym2608" else 2
+
+    def unlock(port, reg, seq):
+        # ロックより後に書かれたコマンド (通し番号が大きいもの) だけが、ロックを解除できる
+        if lock_seq.get((port, reg), -1) < seq:
+            vgm.clear_lock(port, reg)
+            lock_seq.pop((port, reg), None)
+
+    def unlock_voice(part, seq):
+        port = PORT[part]
+        for slot in SLOT_MAP[part]:
+            for base in (0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90):
+                unlock(port, base + slot, seq)
+        unlock(port, 0xB0 + REG_CH[part], seq)
+
+    def unlock_tl(part, seq):
+        vp = "C" if part in FM3_PARTS else part
+        if voice[vp] not in song.voices or (part in FM3_PARTS and part != "C" and ex_ops[part] == 0xF):
+            return
+        ops = (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF
+        for index in CARRIERS.get(clamp(song.voices[voice[vp]][0], 0, 7), (3,)):
+            if (ops >> index) & 1:
+                unlock(PORT[part], 0x40 + SLOT_MAP[part][index], seq)
+
+    def unlock_ssg(regs, seq):
+        for reg in regs:
+            unlock(ssg_port, reg, seq)
+
     def rewrite_pitch(part):
         if held[part] is None or part in (RHYTHM_PART, ADPCM_PART):
             return
         if part in SSG_PARTS:
             write_ssg_pitch(ay, part, held[part], detune[part], lfo[part]["offset"] if lfo[part]["on"] else 0)
             flush_ssg(vgm, ay)
-        elif effect and part == "C":
-            write_ch3_slots(vgm, held[part], detune[part] + lfo[part]["offset"], slot_dt)
+        elif ext_mode and part in FM3_PARTS:
+            _, sdt, ops = fm3_args(part)
+            write_ch3_slots(vgm, held[part], detune[part] + lfo[part]["offset"], sdt, ops)
         elif part in FM_PARTS:
             write_pitch(vgm, part, held[part], detune[part] + lfo[part]["offset"])
 
@@ -204,7 +261,7 @@ def compile_song(song: Song) -> bytes:
             return clamp(song.pcm_slots[pcm_voice][2] + pcm_bias, 0, 255)
         return volume[ADPCM_PART]
 
-    order = {"loop": 0, "tempo_bpm": 0, "tempo_tb": 0, "clock": 0, "ssg_preset": 1, "lfo": 1, "trem": 1, "ssg_env": 1, "hw_env": 1, "hw_period": 1, "reverb": 1, "slot_dt": 1, "lfo22": 1, "lfo_ch": 1, "lfo_amon": 1, "reg": 1, "voice": 1, "pcm": 1, "pcm_vm": 1, "pcm_pan": 1, "mixer": 1, "noise": 1, "rhythm_mask": 1, "rhythm_vol": 1, "rhythm_pan": 1, "volume": 2, "volume_fine": 2, "pan": 2, "detune": 2, "rev_tail": 3, "note_off": 3, "rest": 5, "note_on": 4, "porta_on": 4, "porta_step": 6}
+    order = {"loop": 0, "tempo_bpm": 0, "tempo_tb": 0, "clock": 0, "ssg_preset": 1, "lfo": 1, "trem": 1, "ssg_env": 1, "hw_env": 1, "hw_period": 1, "reverb": 1, "slot_dt": 1, "ex": 1, "lfo22": 1, "lfo_ch": 1, "lfo_amon": 1, "reg": 1, "voice": 1, "pcm": 1, "pcm_vm": 1, "pcm_pan": 1, "mixer": 1, "noise": 1, "rhythm_mask": 1, "rhythm_vol": 1, "rhythm_pan": 1, "volume": 2, "volume_fine": 2, "pan": 2, "detune": 2, "rev_tail": 3, "note_off": 3, "rest": 5, "note_on": 4, "porta_on": 4, "porta_step": 6}
 
     def expand_porta(events):
         out = []
@@ -221,7 +278,15 @@ def compile_song(song: Song) -> bytes:
     if song.chip == "ym2608":
         vgm.write_ym2608(0, 0x10, 0x80)
         write_rhythm_levels()
-    for ev in sorted(expand_porta(song.events), key=lambda e: (e.tick, order.get(e.kind, 9), e.part)):
+        if ext_mode:
+            vgm.write_ym2608(0, 0x27, 0x40)
+    def ev_key(e):
+        # ポルタメントの最後のステップは、同じ時刻の次の音符より先に実行する (後だと次の音符の音程を上書きしてしまう)
+        rank = 2 if e.kind == "porta_step" and e.duration >= e.aux else order.get(e.kind, 9)
+        return (e.tick, rank, e.part)
+
+    for ev in sorted(expand_porta(song.events), key=ev_key):
+        cur_seq = seq_of.get(id(ev), 0)
         write_wait_mod(ticks_to_samples(ev.tick - last_tick, song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
         last_tick = ev.tick
         if ev.kind == "loop":
@@ -233,9 +298,10 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "clock":
             clock_c = max(1, ev.value)
         elif ev.kind == "ssg_preset":
+            unlock_ssg((7, 8 + SSG_CH[ev.part]), cur_seq)
             apply_ssg_preset(ev.part, ev.value)
         elif ev.kind == "pcm":
-            if ev.value not in song.pcm_slots:
+            if song.pcm_slots and ev.value not in song.pcm_slots:
                 raise ValueError(f"PCM @{ev.value} が定義されていません")
             pcm_voice = ev.value
         elif ev.kind == "pcm_vm":
@@ -244,9 +310,11 @@ def compile_song(song: Song) -> bytes:
             pcm_pan = ev.value
         elif ev.kind == "hw_env":
             hw_env[ev.part], hw_shape[ev.part] = True, ev.value
+            unlock_ssg((8 + SSG_CH[ev.part],), cur_seq)
             vgm.write_ssg(13, ev.value & 15)
             vgm.write_ssg(8 + SSG_CH[ev.part], 0x10)
         elif ev.kind == "hw_period":
+            unlock_ssg((11, 12), cur_seq)
             vgm.write_ssg(11, ev.value & 0xFF)
             vgm.write_ssg(12, (ev.value >> 8) & 0xFF)
         elif ev.kind == "rhythm_mask":
@@ -274,18 +342,20 @@ def compile_song(song: Song) -> bytes:
             elif ev.part in FM_PARTS:
                 refresh_voice(ev.part)
         elif ev.kind == "ssg_env":
+            unlock_ssg((8 + SSG_CH[ev.part],), cur_seq)
             al, ar, dr, sl, sr, rr = ev.params
             env[ev.part].update(on=True, al=clamp(al, 0, 255), ar=clamp(ar, 0, 255), dr=clamp(dr, 0, 255), sl=clamp(sl, 0, 255), sr=clamp(sr, 0, 255), rr=clamp(rr, 0, 255))
         elif ev.kind == "reverb":
             rev[ev.part].update(on=bool(ev.legato), val=ev.value, mode=ev.note)
         elif ev.kind == "slot_dt":
             slot_dt = [ev.duration, ev.aux, ev.value, ev.note]
-            effect = any(slot_dt)
-            vgm.write_ym2608(0, 0x27, 0x40 if effect else 0)
             rewrite_pitch("C")
+        elif ev.kind == "ex":
+            ex_ops[ev.part] = ev.value
         elif ev.kind == "lfo22":
             vgm.write_ym2608(0, 0x22, ev.value & 0xFF)
         elif ev.kind == "lfo_ch":
+            unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pms[ev.part], ams[ev.part] = ev.note, ev.value
             write_b4(vgm, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "lfo_amon":
@@ -294,17 +364,22 @@ def compile_song(song: Song) -> bytes:
             vgm.write_ym2608(PORT[ev.part], 0x60 + SLOT_MAP[ev.part][ev.note], ((1 if ev.value else 0) << 7) | dr)
         elif ev.kind == "reg":
             if ev.part in SSG_PARTS and song.chip != "ym2608":
-                vgm.write_ssg(ev.note & 0x0F, ev.value)
+                vgm.write_ssg(ev.note & 0x0F, ev.value, True)
+                lock_seq[(2, ev.note & 0x0F)] = cur_seq
             else:
-                vgm.write_ym2608(ev.duration, ev.note, ev.value)
+                vgm.write_ym2608(ev.duration, ev.note, ev.value, True)
+                lock_seq[(1 if ev.duration else 0, ev.note & 0xFF)] = cur_seq
         elif ev.kind == "voice":
             voice[ev.part] = ev.value
+            unlock_voice(ev.part, cur_seq)
             refresh_voice(ev.part)
         elif ev.kind == "mixer":
+            unlock_ssg((7,), cur_seq)
             mixer[ev.part] = ev.value
             ay.set_mixer(SSG_CH[ev.part], ev.value)
             flush_ssg(vgm, ay)
         elif ev.kind == "noise":
+            unlock_ssg((6,), cur_seq)
             ay.noise = ev.value
             flush_ssg(vgm, ay)
         elif ev.kind == "volume" and ev.part == ADPCM_PART:
@@ -313,6 +388,10 @@ def compile_song(song: Song) -> bytes:
                 vgm.write_ym2608(1, 0x0B, volume[ev.part])
         elif ev.kind == "volume":
             vol_mode[ev.part], volume[ev.part] = "v", ev.value
+            if ev.part in SSG_PARTS:
+                unlock_ssg((8 + SSG_CH[ev.part],), cur_seq)
+            elif ev.part in FM_PARTS:
+                unlock_tl(ev.part, cur_seq)
             if ev.part in SSG_PARTS and (held[ev.part] is not None or env[ev.part]["phase"] != "off"):
                 ssg_out_vol(ev.part)
                 flush_ssg(vgm, ay)
@@ -321,8 +400,10 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "volume_fine":
             vol_mode[ev.part], volume[ev.part] = "V", ev.value
             if ev.part in FM_PARTS:
+                unlock_tl(ev.part, cur_seq)
                 refresh_voice(ev.part)
         elif ev.kind == "pan":
+            unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pan[ev.part] = ev.value
             write_b4(vgm, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "detune" and ev.part == ADPCM_PART:
@@ -336,6 +417,16 @@ def compile_song(song: Song) -> bytes:
             vol = fine_reverb_volume(volume[ev.part], rev[ev.part]["val"]) if vol_mode[ev.part] == "V" else fm_reverb_volume(volume[ev.part], rev[ev.part]["val"])
             refresh_voice(ev.part, vol)
             rev[ev.part]["tail"] = True
+        elif ev.kind == "rev_tail" and ev.part in SSG_PARTS and rev[ev.part]["on"]:
+            vol = ssg_reverb_volume(volume[ev.part], rev[ev.part]["val"])
+            rev[ev.part]["tail"], rev[ev.part]["vol"] = True, vol
+            if env[ev.part]["on"] and not hw_env[ev.part]:
+                env[ev.part]["phase"] = "off"
+            if hw_env[ev.part]:
+                vgm.write_ssg(8 + SSG_CH[ev.part], vol)
+            else:
+                ay.set_volume(SSG_CH[ev.part], vol)
+                flush_ssg(vgm, ay)
         elif ev.kind == "note_on" and ev.part == RHYTHM_PART:
             note_gen[ev.part] = ev.aux
             held[ev.part] = rhythm_mask
@@ -343,9 +434,12 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "note_on" and ev.part == ADPCM_PART:
             same = ev.legato and held[ev.part] == ev.note
             note_gen[ev.part] = ev.aux
+            if not song.pcm_slots:
+                held[ev.part] = ev.note
+                continue
             if pcm_voice not in song.pcm_slots:
                 raise ValueError(f"PCM @{pcm_voice} が定義されていません")
-            start, end, _base = song.pcm_slots[pcm_voice]
+            start, end, _base = pcm_slots[pcm_voice]
             held[ev.part] = ev.note
             if same:
                 set_rate(vgm, delta_n(ev.note, detune[ev.part]))
@@ -354,6 +448,8 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "note_on":
             note_gen[ev.part] = ev.aux
             if ev.part in SSG_PARTS:
+                unlock_ssg((2 * SSG_CH[ev.part], 2 * SSG_CH[ev.part] + 1), cur_seq)
+                rev[ev.part]["tail"] = False
                 if not ev.legato:
                     reset_mod(lfo[ev.part])
                     reset_mod(trem[ev.part])
@@ -370,6 +466,8 @@ def compile_song(song: Song) -> bytes:
                     ssg_out_vol(ev.part)
                     flush_ssg(vgm, ay)
             else:
+                if ev.part in FM3_PARTS and not ev.legato:
+                    key_ops[ev.part] = ex_ops[ev.part]
                 if rev[ev.part]["tail"]:
                     refresh_voice(ev.part)
                     rev[ev.part]["tail"] = False
@@ -378,22 +476,28 @@ def compile_song(song: Song) -> bytes:
                     reset_mod(trem[ev.part])
                     refresh_voice(ev.part)
                 held[ev.part] = ev.note
-                key_on(vgm, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, effect, slot_dt)
+                eff, sdt, ops = fm3_args(ev.part)
+                key_on(vgm, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_on" and ev.part in FM_PARTS:
             note_gen[ev.part] = ev.aux
+            if ev.part in FM3_PARTS and not ev.legato:
+                key_ops[ev.part] = ex_ops[ev.part]
             held[ev.part] = ev.note
-            key_on(vgm, ev.part, ev.note, detune[ev.part], ev.legato, effect, slot_dt)
+            eff, sdt, ops = fm3_args(ev.part)
+            key_on(vgm, ev.part, ev.note, detune[ev.part], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_step" and ev.part in FM_PARTS:
             held[ev.part] = ev.value
-            start = scaled_pitch(ev.note, detune[ev.part])
-            end = scaled_pitch(ev.value, detune[ev.part])
-            block, fnum = split_pitch(start + (end - start) * ev.duration // max(1, ev.aux))
-            if effect and ev.part == "C":
-                write_ch3_slots(vgm, ev.value, detune[ev.part], slot_dt)
+            if ext_mode and ev.part in FM3_PARTS:
+                _, sdt, ops = fm3_args(ev.part)
+                write_ch3_porta(vgm, ev.note, ev.value, detune[ev.part], sdt, ev.duration, ev.aux, ops)
             else:
+                start = scaled_pitch(ev.note, detune[ev.part])
+                end = scaled_pitch(ev.value, detune[ev.part])
+                block, fnum = split_pitch(start + (end - start) * ev.duration // max(1, ev.aux))
                 write_fnum(vgm, ev.part, block, fnum)
         elif ev.kind == "porta_on" and ev.part in SSG_PARTS:
             note_gen[ev.part] = ev.aux
+            rev[ev.part]["tail"] = False
             if not ev.legato and env[ev.part]["on"] and not hw_env[ev.part]:
                 start_env(env[ev.part])
             held[ev.part] = ev.note
@@ -432,7 +536,14 @@ def compile_song(song: Song) -> bytes:
                 continue
             held[ev.part] = None
             if ev.part in SSG_PARTS:
-                if hw_env[ev.part]:
+                if rev[ev.part]["tail"]:
+                    rev[ev.part]["tail"] = False
+                    if hw_env[ev.part]:
+                        vgm.write_ssg(8 + SSG_CH[ev.part], 0x00)
+                    else:
+                        ay.set_volume(SSG_CH[ev.part], 0)
+                        flush_ssg(vgm, ay)
+                elif hw_env[ev.part]:
                     vgm.write_ssg(8 + SSG_CH[ev.part], 0x00)
                 elif env[ev.part]["on"] and env[ev.part]["phase"] != "off":
                     env[ev.part]["phase"] = "release"
@@ -442,7 +553,7 @@ def compile_song(song: Song) -> bytes:
                     ay.set_volume(SSG_CH[ev.part], 0)
                     flush_ssg(vgm, ay)
             elif ev.part in FM_PARTS:
-                key_off(vgm, ev.part)
+                key_off(vgm, ev.part, key_ops[ev.part] if ev.part in FM3_PARTS else 0xF, kon if ev.part in FM3_PARTS else None)
                 if rev[ev.part]["tail"]:
                     refresh_voice(ev.part)
                     rev[ev.part]["tail"] = False

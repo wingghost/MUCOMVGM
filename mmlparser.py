@@ -6,7 +6,7 @@ from pathlib import Path
 
 from adpcm import load_song_pcm
 from chips.ay8910 import SSG_PARTS
-from chips.opn import FM_PARTS, SLOT_MAP, Y_SLOT_REGS, lfo22_value, pack_voice, y_port
+from chips.opn import EXT_PARTS, FM3_PARTS, FM_PARTS, SLOT_MAP, Y_SLOT_REGS, lfo22_value, pack_voice, y_port
 from vgmwriter import AY_CLOCK, DEFAULT_C, INTERNAL_WHOLE, YM2608_CLOCK, clamp
 
 NOTE_MAP = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
@@ -70,6 +70,8 @@ class PartState:
     clock_c: int = DEFAULT_C
     total_clocks: int = 0
     marks: list = field(default_factory=lambda: [(0, 0)])
+    ex_mask: int = 0xF
+    spans: list = field(default_factory=list)
     vol_mode: str = "v"
     volume_v: int = 15
     volume_fine: int = 127
@@ -160,7 +162,7 @@ def read_signed_number(text: str, i: int, fallback: int) -> tuple[int, int]:
     return (sign * int(digits), j - 1) if digits else (fallback, i)
 
 
-def read_imm(text: str, i: int, end: int, fallback: int = 0) -> tuple[int, int]:
+def read_imm(text: str, i: int, end: int, fallback: int = 0, max_hex: int | None = None) -> tuple[int, int]:
     j = i
     while j < end and text[j] in " \t,":
         j += 1
@@ -173,7 +175,7 @@ def read_imm(text: str, i: int, end: int, fallback: int = 0) -> tuple[int, int]:
     if j < end and text[j] == "$":
         j += 1
         k = j
-        while k < end and text[k] in "0123456789abcdefABCDEF":
+        while k < end and text[k] in "0123456789abcdefABCDEF" and (max_hex is None or k - j < max_hex):
             k += 1
         return (sign * int(text[j:k], 16), k - 1) if k > j else (fallback, i)
     if j < end and text[j].isdigit():
@@ -403,21 +405,34 @@ def clocks_to_internal(clocks, clock_c):
 
 
 def parse_duration_spec(mml, i, end, def_len, def_clocks, clock_c):
+    def with_dots(base, dots):
+        extra, add = base, 0
+        for _ in range(dots):
+            extra //= 2
+            add += extra
+        return max(1, base + add)
+
     def one():
         nonlocal i
+        explicit = False
+        dots = 0
         if i + 1 < end and mml[i + 1] == "%":
             clocks, i = read_number(mml, i + 1, 1)
-            return clocks_to_internal(max(1, clocks), clock_c)
-        dots = 0
+            base = clocks_to_internal(max(1, clocks), clock_c)
+            while i + 1 < end and mml[i + 1] == ".":
+                dots += 1
+                i += 1
+            return with_dots(base, dots)
         if i + 1 < end and mml[i + 1].isdigit():
             length, i = read_number(mml, i, def_len)
+            explicit = True
         else:
             length = def_len
         while i + 1 < end and mml[i + 1] == ".":
             dots += 1
             i += 1
-        if def_clocks is not None and dots == 0 and length == def_len and not (i + 1 < end and mml[i + 1].isdigit()):
-            return clocks_to_internal(def_clocks, clock_c)
+        if def_clocks is not None and not explicit:
+            return with_dots(clocks_to_internal(def_clocks, clock_c), dots)
         return note_duration(length, dots)
     duration = one()
     while i + 1 < end and mml[i + 1] == "^":
@@ -443,6 +458,10 @@ def note_index(octave, name, acc, transpose):
 
 def fm_reverb_volume(volume_v, rev_val):
     return clamp(((volume_v + rev_val + 4) // 2) - 4, 0, 15)
+
+
+def ssg_reverb_volume(volume_v, rev_val):
+    return clamp((volume_v + rev_val) // 2, 0, 15)
 
 
 def fine_reverb_volume(volume_fine, rev_val):
@@ -504,7 +523,7 @@ def parse_part_mml(song, part, mml, state):
     def emit_note_tail(duration, note, gen):
         nonlocal pending_tie
         gate = gate_duration(duration, q, q_mode, q_div, clock_c)
-        if rev_on and part in FM_PARTS:
+        if rev_on and (part in FM_PARTS or part in SSG_PARTS):
             song.events.append(MusicEvent("rev_tail", tick + gate, part=part))
             if rev_mode == 1:
                 song.events.append(MusicEvent("note_off", tick + max(gate, duration), note=note, part=part, aux=gen))
@@ -534,7 +553,9 @@ def parse_part_mml(song, part, mml, state):
             on_at = min(on_at, tick + max(1, gate) - 1)
         if shift < 0 and not legato:
             song.events.append(MusicEvent("note_off", on_at, part=part, aux=note_gen - 1))
-        song.events.append(MusicEvent("note_on", on_at, duration=duration, note=note, part=part, legato=legato, aux=note_gen))
+        song.events.append(MusicEvent("note_on", on_at, duration=duration, note=note, part=part, legato=legato, aux=note_gen, value=state.ex_mask if part in FM3_PARTS else 0))
+        if part in FM3_PARTS:
+            state.spans.append([tick, tick + duration, state.ex_mask])
         return note_gen
 
     def emit_echo():
@@ -544,6 +565,11 @@ def parse_part_mml(song, part, mml, state):
             duration = clocks_to_internal(def_clocks, clock_c) if def_clocks else note_duration(def_len, False)
         else:
             note, duration = note_hist[-echo_back]
+        if part in EXT_PARTS and state.ex_mask == 0xF:
+            total_clocks += duration * clock_c // INTERNAL_WHOLE
+            tick += duration
+            state.marks.append((tick, total_clocks))
+            return
         apply_volume_delta(-max(0, echo_drop))
         gen = shuffled_on(note, duration, False)
         emit_note_tail(duration, note, gen)
@@ -597,8 +623,10 @@ def parse_part_mml(song, part, mml, state):
                 if tied:
                     i = j
                 total_clocks += duration * clock_c // INTERNAL_WHOLE
-                if not muted:
+                if not muted and not (part in EXT_PARTS and state.ex_mask == 0xF):
                     note_gen += 1
+                    if part in FM3_PARTS:
+                        state.spans.append([tick, tick + duration, state.ex_mask])
                     porta_clocks = max(1, duration * clock_c // INTERNAL_WHOLE)
                     song.events.append(MusicEvent("porta", tick, duration=duration, note=start_note, value=end_note, part=part, legato=pending_tie, aux=note_gen, params=(porta_clocks,)))
                     if tied:
@@ -688,7 +716,8 @@ def parse_part_mml(song, part, mml, state):
                 apply_volume_delta(-n)
             elif c == "@" and part in FM_PARTS:
                 voice, i = read_number(mml, i, 1)
-                song.events.append(MusicEvent("voice", tick, value=voice, part=part))
+                if part not in EXT_PARTS:
+                    song.events.append(MusicEvent("voice", tick, value=voice, part=part))
             elif c == "@" and part in SSG_PARTS:
                 no, i = read_number(mml, i, 0)
                 if not 0 <= no <= 255:
@@ -713,13 +742,26 @@ def parse_part_mml(song, part, mml, state):
                 song.events.append(MusicEvent("pcm_pan", tick, value=clamp(pan, 0, 3), part=part))
             elif c == "p" and part in FM_PARTS:
                 pan, i = read_number(mml, i, 3)
-                song.events.append(MusicEvent("pan", tick, value=pan, part=part))
+                if part not in EXT_PARTS:
+                    song.events.append(MusicEvent("pan", tick, value=pan, part=part))
             elif c == "P" and part in SSG_PARTS:
                 mixer, i = read_number(mml, i, mixer)
                 song.events.append(MusicEvent("mixer", tick, value=clamp(mixer, 0, 3), part=part))
             elif c == "w" and part in SSG_PARTS:
                 noise, i = read_number(mml, i, noise)
                 song.events.append(MusicEvent("noise", tick, value=clamp(noise, 0, 31), part=part))
+            elif c == "E" and i + 1 < end and mml[i + 1] == "X":
+                if part not in FM3_PARTS:
+                    raise ValueError(f"{part}: EX は C/L/M/N パートでのみ使えます")
+                k = i + 2
+                while k < end and mml[k] in "0123456789":
+                    k += 1
+                digits = mml[i + 2:k]
+                if not digits or any(d not in "1234" for d in digits):
+                    raise ValueError(f"{part}: EX は 1～4 の数字で指定します (例: EX1234)")
+                state.ex_mask = sum(1 << (int(d) - 1) for d in set(digits))
+                song.events.append(MusicEvent("ex", tick, value=state.ex_mask, part=part))
+                i = k - 1
             elif c == "E" and part in SSG_PARTS:
                 al, k = read_imm(mml, i + 1, end, 255)
                 ar, k = read_imm(mml, k + 1, end, 255)
@@ -742,6 +784,11 @@ def parse_part_mml(song, part, mml, state):
                     raise ValueError("L は1つだけです")
                 song.loop_tick = tick
                 song.events.append(MusicEvent("loop", tick, part=part))
+            elif c == "S" and part in EXT_PARTS:
+                k = i
+                for _ in range(3):
+                    _, k = read_imm(mml, k + 1, end, 0)
+                _, i = read_imm(mml, k + 1, end, 0)
             elif c == "S" and part == "C":
                 op4, k = read_imm(mml, i + 1, end, 0)
                 op3, k = read_imm(mml, k + 1, end, 0)
@@ -804,6 +851,17 @@ def parse_part_mml(song, part, mml, state):
                     rev_val, i = read_imm(mml, i + 1, end, rev_val)
                     rev_on = True
                 song.events.append(MusicEvent("reverb", tick, note=rev_mode, value=rev_val, part=part, legato=rev_on))
+            elif c == "H" and part in EXT_PARTS:
+                nxt = mml[i + 1] if i + 1 < end else ""
+                if nxt in "FfWwPpAa":
+                    _, i = read_imm(mml, i + 2, end, 0)
+                elif nxt in "Mm":
+                    _, k = read_imm(mml, i + 2, end, 1)
+                    _, i = read_imm(mml, k + 1, end, 1)
+                else:
+                    _, k = read_imm(mml, i + 1, end, 0)
+                    _, k = read_imm(mml, k + 1, end, 0)
+                    _, i = read_imm(mml, k + 1, end, 0)
             elif c == "H" and part in FM_PARTS:
                 nxt = mml[i + 1] if i + 1 < end else ""
                 if nxt in "Ff":
@@ -840,7 +898,7 @@ def parse_part_mml(song, part, mml, state):
                 tag = mml[i + 1:i + 3].upper()
                 if part in FM_PARTS and tag in Y_SLOT_REGS:
                     slot, k = read_imm(mml, i + 3, end, 1)
-                    data, k = read_imm(mml, k + 1, end, 0)
+                    data, k = read_imm(mml, k + 1, end, 0, 2)
                     slot_i = clamp(slot, 1, 4) - 1
                     if tag == "DR":
                         amon[slot_i] = 1 if data & 0x80 else 0
@@ -849,14 +907,10 @@ def parse_part_mml(song, part, mml, state):
                     i = k
                 else:
                     reg, k = read_imm(mml, i + 1, end, 0)
-                    data, k = read_imm(mml, k + 1, end, 0)
-                    if part == ADPCM_PART:
-                        port = 1
-                    elif part in FM_PARTS:
-                        port = y_port(part, reg & 0xFF)
-                    else:
-                        port = 0
-                    song.events.append(MusicEvent("reg", tick, duration=port, note=reg & 0xFF, value=data & 0xFF, part=part))
+                    data, k = read_imm(mml, k + 1, end, 0, 2)
+                    if not 0 <= reg <= 0x1FF:
+                        raise ValueError(f"{part}: y のレジスタ番号は $000～$1FF (0～511) です")
+                    song.events.append(MusicEvent("reg", tick, duration=1 if reg >= 0x100 else 0, note=reg & 0xFF, value=data & 0xFF, part=part))
                     i = k
             elif c == ">":
                 octave = clamp(octave + 1, lo, 8)
@@ -872,7 +926,7 @@ def parse_part_mml(song, part, mml, state):
                 if tied:
                     i = j
                 total_clocks += duration * clock_c // INTERNAL_WHOLE
-                if c == "r" or muted:
+                if c == "r" or muted or (part in EXT_PARTS and state.ex_mask == 0xF):
                     if pending_tie and not (rev_on and rev_mode == 0):
                         song.events.append(MusicEvent("note_off", tick, part=part, aux=note_gen))
                         pending_tie = False
@@ -881,6 +935,8 @@ def parse_part_mml(song, part, mml, state):
                     note = 0 if part == RHYTHM_PART else note_index(octave, c.lower(), acc, transpose)
                     if pending_tie and note == tie_note and part != RHYTHM_PART:
                         tie_dur += duration
+                        if part in FM3_PARTS and state.spans:
+                            state.spans[-1][1] = tie_origin + tie_dur
                         if tied:
                             pending_tie = True
                         else:
@@ -953,6 +1009,20 @@ def take_ssg_preset(lines, i, no):
         buf.append(row)
         i += 1
     raise ValueError(f"SSG音色 @{no} の '}}' がありません")
+
+
+def check_ex_overlap(states: dict) -> None:
+    # C/L/M/N の音符(休符を除く)が、時間的に重なり、かつ同じオペレータを担当していたらエラーにする
+    spans = sorted((s, e, m, p) for p in FM3_PARTS if p in states for s, e, m in states[p].spans)
+    active = []
+    for s, e, m, p in spans:
+        active = [a for a in active if a[1] > s]
+        for s2, e2, m2, p2 in active:
+            if p2 != p and m & m2:
+                names = sorted((p, p2))
+                ops = ",".join(str(i + 1) for i in range(4) if (m & m2) >> i & 1)
+                raise ValueError(f"{names[0]} と {names[1]}: オペレータ{ops} が同時に使われています (tick {s})")
+        active.append((s, e, m, p))
 
 
 def clocks_at_tick(marks: list, tick: int) -> int:
@@ -1043,6 +1113,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
     if pending:
         part = next(iter(pending))
         raise ValueError(f"{part}: ループの ']' がありません")
+    check_ex_overlap(states)
     for part, st in states.items():
         song.part_clocks[part] = st.total_clocks
         if song.loop_tick is not None:
