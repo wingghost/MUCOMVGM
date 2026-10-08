@@ -287,8 +287,9 @@ def compile_song(song: Song) -> bytes:
 
     for ev in sorted(expand_porta(song.events), key=ev_key):
         cur_seq = seq_of.get(id(ev), 0)
-        write_wait_mod(ticks_to_samples(ev.tick - last_tick, song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
-        last_tick = ev.tick
+        now = max(ev.tick, 0)
+        write_wait_mod(ticks_to_samples(now - last_tick, song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
+        last_tick = now
         if ev.kind == "loop":
             vgm.mark_loop()
         elif ev.kind == "tempo_bpm":

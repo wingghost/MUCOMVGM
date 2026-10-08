@@ -28,8 +28,8 @@ ADPCM を使う曲は、`.muc` と同じフォルダに PCM ファイルを置�
 
 pcmlist.txt の中身は、番号とファイル名です。
 
-1 kick.wav  
-2 snare.wav  
+kick.wav  
+snare.wav  
 
 WAV は 16kHz/16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
 
@@ -73,6 +73,12 @@ L/M/Nはほとんどのコマンドを書くことができるが、Sコマン�
 MIT License。詳細は LICENSE.txt を見てください。
 
 ## 更新履歴
+
+2026/10/09 Ver.0.0.5  
+    - MMLパーサーの仕様を変更  
+    - pcmlistのバグを修正
+    - SSG音源の音長バグを修正
+    - Jコマンドのバグを修正
 
 2026/10/06 Ver.0.0.4  
     - 効果音モード実装  

@@ -118,6 +118,7 @@ class Song:
     part_clocks: dict[str, int] = field(default_factory=dict)
     part_loop_clocks: dict[str, int] = field(default_factory=dict)
     loop_tick: int | None = None
+    jump_tick: int = 0
     lfo_enable: int = 0
     lfo_speed: int = 0
     voice_file: str = ""
@@ -368,6 +369,42 @@ def find_top_slash(text, start, end):
     return None
 
 
+def static_state_after(text, start, end, def_len, def_clocks, transpose, vol_bias):
+    # ループの / より後ろにある l, K, k, V が、ループを抜けたあとの状態に与える影響を調べる
+    # (コンパイル時に決まる設定。MUCOM88はループの本体を1回だけコンパイルするため、本体の最後の状態が残る)
+    i = start
+    while i < end:
+        c = text[i]
+        if c == "[":
+            close = find_loop_end(text, i)
+            def_len, def_clocks, transpose, vol_bias = static_state_after(text, i + 1, close, def_len, def_clocks, transpose, vol_bias)
+            i = close
+        elif c == "{":
+            i = find_brace_end(text, i)
+        elif c == "y":
+            if text[i + 1:i + 3].upper() in Y_SLOT_REGS:
+                i += 2
+        elif c == "l":
+            j = i + 1
+            if j < end and text[j] == "%":
+                clocks, k = read_number(text, j, 0)
+                if k != j:
+                    def_clocks, i = max(1, clocks), k
+            elif j < end and text[j].isdigit():
+                def_len, i = read_number(text, i, def_len)
+                def_clocks = None
+        elif c == "K":
+            transpose, i = read_signed_number(text, i, transpose)
+            transpose = clamp(transpose, -128, 128)
+        elif c == "k":
+            delta, i = read_signed_number(text, i, 0)
+            transpose = clamp(transpose + delta, -128, 128)
+        elif c == "V":
+            vol_bias, i = read_signed_number(text, i, vol_bias)
+        i += 1
+    return def_len, def_clocks, transpose, vol_bias
+
+
 def octave_after(text, start, end, octave, lo=1):
     i = start
     while i < end:
@@ -599,19 +636,24 @@ def parse_part_mml(song, part, mml, state):
                 i += 1
                 continue
             if c == "J":
-                jump_tick = tick
+                song.jump_tick = max(song.jump_tick, tick)
                 i += 1
                 continue
             if c == "[":
                 close = find_loop_end(mml, i)
                 count, k = read_number(mml, close, 2)
-                body, slash, saved = i + 1, find_top_slash(mml, i + 1, close), octave
+                body, slash = i + 1, find_top_slash(mml, i + 1, close)
+                # オクターブ・音長(l)・移調(K,k)・音量の相対変化(V)は、コンパイル時に決まる設定。
+                # ループの本体は1回だけコンパイルされて繰り返されるので、繰り返しのたびに、ループ先頭の値に戻す。
+                saved = (octave, def_len, def_clocks, transpose, vol_bias)
                 for rep in range(max(1, count)):
-                    octave = saved
+                    octave, def_len, def_clocks, transpose, vol_bias = saved
                     parse_range(body, slash if rep == count - 1 and slash is not None else close)
                     if stopped:
                         break
-                octave = octave_after(mml, body, close, saved, lo)
+                if slash is not None and count >= 1:
+                    def_len, def_clocks, transpose, vol_bias = static_state_after(mml, slash + 1, close, def_len, def_clocks, transpose, vol_bias)
+                octave = octave_after(mml, body, close, saved[0], lo)
                 i = k + 1
                 continue
             if c == "{":
@@ -964,14 +1006,6 @@ def parse_part_mml(song, part, mml, state):
             i += 1
 
     parse_range(0, len(mml))
-    if jump_tick is not None:
-        song.events = [
-            e if e.part != part else replace(e, tick=e.tick - jump_tick)
-            for e in song.events
-            if e.part != part or e.tick >= jump_tick
-        ]
-        tick -= jump_tick
-        total_clocks = max(0, total_clocks - jump_tick * clock_c // INTERNAL_WHOLE)
     state.tick, state.octave = tick, octave
     state.def_len, state.def_clocks = def_len, def_clocks
     state.q, state.q_mode, state.q_div = q, q_mode, q_div
@@ -1025,6 +1059,32 @@ def check_ex_overlap(states: dict) -> None:
         active.append((s, e, m, p))
 
 
+def apply_jump(song: Song) -> None:
+    # J: 一番後ろの J より前の音符・休符を全パートで取り除き、音色・音量などの設定は残したまま、その位置から演奏する。
+    # 設定のイベントは時刻をマイナスにして先に実行する (ドライバーはマイナスの時刻では時間を進めない)。
+    j = song.jump_tick
+    if j <= 0:
+        return
+    dropped = {(e.part, e.aux) for e in song.events if e.kind in ("note_on", "porta") and e.tick < j}
+    events, seen_note = [], set()
+    for e in song.events:
+        if e.kind in ("note_on", "porta"):
+            if e.tick < j:
+                continue
+            if e.part not in seen_note:
+                seen_note.add(e.part)
+                if e.legato:
+                    e = replace(e, legato=False)
+        elif e.kind in ("rest", "rev_tail") and e.tick < j:
+            continue
+        elif e.kind == "note_off" and (e.tick < j or (e.part, e.aux) in dropped):
+            continue
+        events.append(replace(e, tick=max(0, e.tick - j)) if e.kind == "loop" else replace(e, tick=e.tick - j))
+    song.events = events
+    if song.loop_tick is not None:
+        song.loop_tick = max(0, song.loop_tick - j)
+
+
 def clocks_at_tick(marks: list, tick: int) -> int:
     # marks = [(tick, 累計クロック), ...]。tick が音符の途中なら、その音符の中を比例配分する
     prev = marks[0]
@@ -1073,7 +1133,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             continue
         mml_lines.append(lines[i])
         i += 1
-    states, pending = {}, {}
+    states, bodies = {}, {}
     for raw in mml_lines:
         line = strip_comment(raw).strip()
         if not line:
@@ -1103,21 +1163,20 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             continue
         if song.chip != "ym2608" and part not in SSG_PARTS:
             continue
-        body = pending.get(part, "") + line[1:].strip()
+        bodies.setdefault(part, []).append(line[1:].strip())
+    # 同じパートの行はすべて繋げて、1回で解析する (行の区切りに結果が左右されないようにする)
+    for part, part_lines in bodies.items():
+        body = "".join(part_lines)
         if body.count("[") > body.count("]"):
-            pending[part] = body
-            continue
-        pending.pop(part, None)
-        state = states.setdefault(part, PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15))
+            raise ValueError(f"{part}: ループの ']' がありません")
+        state = PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15)
+        states[part] = state
         parse_part_mml(song, part, body, state)
-    if pending:
-        part = next(iter(pending))
-        raise ValueError(f"{part}: ループの ']' がありません")
     check_ex_overlap(states)
     for part, st in states.items():
         song.part_clocks[part] = st.total_clocks
         if song.loop_tick is not None:
-            song.part_loop_clocks[part] = st.total_clocks - clocks_at_tick(st.marks, song.loop_tick)
+            song.part_loop_clocks[part] = st.total_clocks - clocks_at_tick(st.marks, max(song.loop_tick, song.jump_tick))
         if st.pending_tie or st.rev_on:
             song.events.append(MusicEvent("note_off", st.tick, part=part, aux=10**9))
     end = max((s.tick for s in states.values()), default=0)
@@ -1131,4 +1190,5 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             raise ValueError(f"{ev.part}: FM音色 @{ev.value} が定義されていません")
     if song.pcm_file or song.pcm_list:
         song.pcm_slots, song.pcm_rom = load_song_pcm(folder or Path("."), song.pcm_file, song.pcm_list)
+    apply_jump(song)
     return song

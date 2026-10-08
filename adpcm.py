@@ -113,12 +113,23 @@ def append_pcm(slots, rom, folder: Path, list_name: str) -> None:
     path = folder / list_name
     if not path.is_file():
         return
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    raw_bytes = path.read_bytes()
+    try:
+        text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw_bytes.decode("cp932", errors="replace")
+    next_no = 1
+    for raw in text.splitlines():
         line = raw.split(";", 1)[0].strip()
         if not line:
             continue
-        no_s, name = line.split(maxsplit=1)
-        no = int(no_s)
+        # 「番号 ファイル名」の行は、その番号。ファイル名だけの行は、書かれた順 (前の番号 + 1) で @1, @2, ... になる
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2 and parts[0].isdigit():
+            no, name = int(parts[0]), parts[1].strip().strip('"')
+        else:
+            no, name = next_no, line.strip('"')
+        next_no = no + 1
         if not 1 <= no <= PCM_SLOTS:
             raise ValueError(f"PCM @{no} は 1～32 です")
         src = folder / name
