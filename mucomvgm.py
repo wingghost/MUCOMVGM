@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from driver import compile_song
-from mmlparser import ALL_PARTS, FM_PARTS, parse_mml
+from mmlparser import ALL_PARTS, FM_PARTS, parse_mml, read_mml_text
 
 
 def main() -> int:
@@ -14,7 +14,7 @@ def main() -> int:
         return 1
     src = Path(sys.argv[1])
     dst = Path(sys.argv[2]) if len(sys.argv) >= 3 else src.with_suffix(".vgm")
-    song = parse_mml(src.read_text(encoding="utf-8"), src.parent)
+    song = parse_mml(read_mml_text(src), src.parent)
     data = compile_song(song)
     dst.write_bytes(data)
     print(f"chip:{song.chip}")

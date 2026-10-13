@@ -118,6 +118,7 @@ class Song:
     part_clocks: dict[str, int] = field(default_factory=dict)
     part_loop_clocks: dict[str, int] = field(default_factory=dict)
     loop_tick: int | None = None
+    loop_candidates: list = field(default_factory=list)
     jump_tick: int = 0
     lfo_enable: int = 0
     lfo_speed: int = 0
@@ -300,6 +301,20 @@ def load_voice_file(folder: Path, name: str) -> dict[int, tuple]:
     return parse_voice_dat(path.read_bytes())
 
 
+def norm_mod_count(n: int) -> int:
+    # LFO の回数は 1 バイトのデータ。マイナスは符号なしとして扱う (-1 は 255)
+    return n & 0xFF if n < 0 else n
+
+
+def read_mml_text(path: Path) -> str:
+    # UTF-8 (BOM つきも可) で読めなければ、Shift-JIS (cp932) として読む
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp932", errors="replace")
+
+
 def parse_ssg_preset(no: int, body: str) -> SsgPreset:
     preset = SsgPreset()
     i, end = 0, len(body)
@@ -327,13 +342,13 @@ def parse_ssg_preset(no: int, body: str) -> SsgPreset:
             step, k = read_imm(body, k + 1, end, 1)
             depth, k = read_imm(body, k + 1, end, 0)
             count, i = read_imm(body, k + 1, end, 0)
-            preset.lfo = (delay, max(1, step), depth, max(0, count))
+            preset.lfo = (delay, max(1, step), depth, norm_mod_count(count))
         elif c == "N":
             delay, k = read_imm(body, i + 1, end, 0)
             step, k = read_imm(body, k + 1, end, 1)
             depth, k = read_imm(body, k + 1, end, 0)
             count, i = read_imm(body, k + 1, end, 0)
-            preset.trem = (delay, max(1, step), depth, max(0, count))
+            preset.trem = (delay, max(1, step), depth, norm_mod_count(count))
         else:
             raise ValueError(f"SSG音色 @{no}: '{c}' は使えません。使えるのは E P M N w です")
         i += 1
@@ -532,7 +547,7 @@ def parse_porta_body(mml, start, end, octave, def_len, def_clocks, clock_c, tran
     return notes[0], notes[-1], duration or note_duration(def_len, False), octave
 
 
-def parse_part_mml(song, part, mml, state):
+def parse_part_mml(song, part, mml, state, line_map=None):
     if state.stopped:
         return
     mml = expand_macros(strip_comment(mml), song.macros)
@@ -567,6 +582,15 @@ def parse_part_mml(song, part, mml, state):
         else:
             song.events.append(MusicEvent("note_off", tick + gate, note=note, part=part, aux=gen))
         pending_tie = False
+
+    def source_pos(i):
+        # 連結したパートの文字位置 i が、ファイルの何番目の行の何文字目か
+        if not line_map:
+            return (0, i)
+        for end, line_idx, start in line_map:
+            if i < end:
+                return (line_idx, i - start)
+        return (line_map[-1][1], i - line_map[-1][2])
 
     def remember(note, duration):
         note_hist.append((note, duration))
@@ -822,10 +846,10 @@ def parse_part_mml(song, part, mml, state):
                 delta, i = read_signed_number(mml, i, 0)
                 transpose = clamp(transpose + delta, -128, 128)
             elif c == "L":
-                if song.loop_tick is not None:
-                    raise ValueError("L は1つだけです")
-                song.loop_tick = tick
-                song.events.append(MusicEvent("loop", tick, part=part))
+                # L が複数あるときは、ファイルの中で最初に書かれたものだけが有効 (parse_mml で選ぶ)
+                loop_ev = MusicEvent("loop", tick, part=part)
+                song.events.append(loop_ev)
+                song.loop_candidates.append((source_pos(i), tick, loop_ev))
             elif c == "S" and part in EXT_PARTS:
                 k = i
                 for _ in range(3):
@@ -851,14 +875,14 @@ def parse_part_mml(song, part, mml, state):
                     lfo_depth, i = read_imm(mml, i + 2, end, lfo_depth)
                 elif nxt in "Dd":
                     lfo_count, i = read_imm(mml, i + 2, end, lfo_count)
-                    lfo_count = max(0, lfo_count)
+                    lfo_count = norm_mod_count(lfo_count)
                 else:
                     lfo_delay, k = read_imm(mml, i + 1, end, 0)
                     lfo_step, k = read_imm(mml, k + 1, end, 1)
                     lfo_depth, k = read_imm(mml, k + 1, end, 0)
                     lfo_count, i = read_imm(mml, k + 1, end, 0)
-                    lfo_step, lfo_count, lfo_on = max(1, lfo_step), max(0, lfo_count), True
-                song.events.append(MusicEvent("lfo", tick, duration=max(1, lfo_step), note=lfo_delay, value=lfo_depth, part=part, legato=lfo_on, aux=max(0, lfo_count)))
+                    lfo_step, lfo_count, lfo_on = max(1, lfo_step), norm_mod_count(lfo_count), True
+                song.events.append(MusicEvent("lfo", tick, duration=max(1, lfo_step), note=lfo_delay, value=lfo_depth, part=part, legato=lfo_on, aux=lfo_count))
             elif c == "N" and part in MOD_PARTS:
                 nxt = mml[i + 1] if i + 1 < end else ""
                 if nxt in "Ff":
@@ -873,14 +897,14 @@ def parse_part_mml(song, part, mml, state):
                     trem_depth, i = read_imm(mml, i + 2, end, trem_depth)
                 elif nxt in "Dd":
                     trem_count, i = read_imm(mml, i + 2, end, trem_count)
-                    trem_count = max(0, trem_count)
+                    trem_count = norm_mod_count(trem_count)
                 else:
                     trem_delay, k = read_imm(mml, i + 1, end, 0)
                     trem_step, k = read_imm(mml, k + 1, end, 1)
                     trem_depth, k = read_imm(mml, k + 1, end, 0)
                     trem_count, i = read_imm(mml, k + 1, end, 0)
-                    trem_step, trem_count, trem_on = max(1, trem_step), max(0, trem_count), True
-                song.events.append(MusicEvent("trem", tick, duration=max(1, trem_step), note=trem_delay, value=trem_depth, part=part, legato=trem_on, aux=max(0, trem_count)))
+                    trem_step, trem_count, trem_on = max(1, trem_step), norm_mod_count(trem_count), True
+                song.events.append(MusicEvent("trem", tick, duration=max(1, trem_step), note=trem_delay, value=trem_depth, part=part, legato=trem_on, aux=trem_count))
             elif c == "R":
                 nxt = mml[i + 1] if i + 1 < end else ""
                 if nxt in "Ff":
@@ -1134,7 +1158,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         mml_lines.append(lines[i])
         i += 1
     states, bodies = {}, {}
-    for raw in mml_lines:
+    for line_idx, raw in enumerate(mml_lines):
         line = strip_comment(raw).strip()
         if not line:
             continue
@@ -1163,15 +1187,26 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             continue
         if song.chip != "ym2608" and part not in SSG_PARTS:
             continue
-        bodies.setdefault(part, []).append(line[1:].strip())
+        bodies.setdefault(part, []).append((line_idx, line[1:].strip()))
     # 同じパートの行はすべて繋げて、1回で解析する (行の区切りに結果が左右されないようにする)
-    for part, part_lines in bodies.items():
-        body = "".join(part_lines)
+    for part, entries in bodies.items():
+        pieces, line_map, total = [], [], 0
+        for line_idx, text in entries:
+            piece = "".join(ch for ch in expand_macros(text, song.macros) if not ch.isspace())
+            line_map.append((total + len(piece), line_idx, total))
+            pieces.append(piece)
+            total += len(piece)
+        body = "".join(pieces)
         if body.count("[") > body.count("]"):
             raise ValueError(f"{part}: ループの ']' がありません")
         state = PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15)
         states[part] = state
-        parse_part_mml(song, part, body, state)
+        parse_part_mml(song, part, body, state, line_map)
+    if song.loop_candidates:
+        first = min(song.loop_candidates, key=lambda cand: cand[0])
+        song.loop_tick = first[1]
+        dropped = {id(cand[2]) for cand in song.loop_candidates if cand[2] is not first[2]}
+        song.events = [e for e in song.events if id(e) not in dropped]
     check_ex_overlap(states)
     for part, st in states.items():
         song.part_clocks[part] = st.total_clocks

@@ -170,7 +170,7 @@ def compile_song(song: Song) -> bytes:
         return max(1, ticks_to_samples(max(1, INTERNAL_WHOLE // max(1, clock_c)), song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
 
     def reset_mod(st):
-        st.update(delay_left=max(0, st["delay"]), step_left=max(1, st["step"]), peak_left=max(0, st["count"]) // 2, delta=st["depth"], offset=0)
+        st.update(delay_left=max(0, st["delay"]), step_left=max(1, st["step"]), peak_left=max(1, st["count"] // 2), delta=st["depth"], offset=0)
 
     def step_mod(st):
         if st["delay_left"] > 0:
