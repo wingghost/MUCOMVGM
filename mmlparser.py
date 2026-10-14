@@ -547,7 +547,8 @@ def parse_porta_body(mml, start, end, octave, def_len, def_clocks, clock_c, tran
                 duration, i = parse_duration_spec(mml, i, end, def_len, def_clocks, clock_c)
         i += 1
     if not notes:
-        raise ValueError("ポルタメントに音符がありません")
+        line_no, _ = source_pos(i)
+        raise ValueError(f"{part} {line_no + 1}行目: ポルタメントに音符がありません")
     return notes[0], notes[-1], duration or note_duration(def_len, False), octave
 
 
@@ -787,13 +788,16 @@ def parse_part_mml(song, part, mml, state, line_map=None):
             elif c == "@" and part in FM_PARTS:
                 voice, i = read_number(mml, i, 1)
                 if part not in EXT_PARTS:
+                    line_no, _ = source_pos(i)
                     song.events.append(MusicEvent("voice", tick, value=voice, part=part))
             elif c == "@" and part in SSG_PARTS:
                 no, i = read_number(mml, i, 0)
                 if not 0 <= no <= 255:
-                    raise ValueError(f"SSG音色 @{no} は 0～255 です")
+                    line_no, _ = source_pos(i)
+                    raise ValueError(f"{part} {line_no + 1}行目: SSG音色 @{no} は 0～255 です")
                 if no not in song.ssg_presets:
-                    raise ValueError(f"SSG音色 @{no} が定義されていません")
+                    line_no, _ = source_pos(i)
+                    raise ValueError(f"{part} {line_no + 1}行目: SSG音色 @{no} が定義されていません")
                 song.events.append(MusicEvent("ssg_preset", tick, value=no, part=part))
             elif c == "@" and part == RHYTHM_PART:
                 rhythm_mask, i = read_number(mml, i, rhythm_mask)
@@ -802,7 +806,8 @@ def parse_part_mml(song, part, mml, state, line_map=None):
             elif c == "@" and part == ADPCM_PART:
                 no, i = read_number(mml, i, 1)
                 if not 1 <= no <= 32:
-                    raise ValueError(f"PCM @{no} は 1～32 です")
+                    line_no, _ = source_pos(i)
+                    raise ValueError(f"{part} {line_no + 1}行目: PCM @{no} は 1～32 です")
                 song.events.append(MusicEvent("pcm", tick, value=no, part=part))
             elif c == "p" and part == RHYTHM_PART:
                 pan, i = read_imm(mml, i + 1, end, 3)
@@ -821,14 +826,15 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                 noise, i = read_number(mml, i, noise)
                 song.events.append(MusicEvent("noise", tick, value=clamp(noise, 0, 31), part=part))
             elif c == "E" and i + 1 < end and mml[i + 1] == "X":
+                line_no, _ = source_pos(i)
                 if part not in FM3_PARTS:
-                    raise ValueError(f"{part}: EX は C/L/M/N パートでのみ使えます")
+                    raise ValueError(f"{part} {line_no + 1}行目: EX は C/L/M/N パートでのみ使えます")
                 k = i + 2
                 while k < end and mml[k] in "0123456789":
                     k += 1
                 digits = mml[i + 2:k]
                 if not digits or any(d not in "1234" for d in digits):
-                    raise ValueError(f"{part}: EX は 1～4 の数字で指定します (例: EX1234)")
+                    raise ValueError(f"{part} {line_no + 1}行目: EX は 1～4 の数字で指定します (例: EX1234)")
                 state.ex_mask = sum(1 << (int(d) - 1) for d in set(digits))
                 song.events.append(MusicEvent("ex", tick, value=state.ex_mask, part=part))
                 i = k - 1
@@ -979,7 +985,8 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                     reg, k = read_imm(mml, i + 1, end, 0)
                     data, k = read_imm(mml, k + 1, end, 0, 2)
                     if not 0 <= reg <= 0x1FF:
-                        raise ValueError(f"{part}: y のレジスタ番号は $000～$1FF (0～511) です")
+                        line_no, _ = source_pos(i)
+                        raise ValueError(f"{part} {line_no + 1}行目: y のレジスタ番号は $000～$1FF (0～511) です")
                     song.events.append(MusicEvent("reg", tick, duration=1 if reg >= 0x100 else 0, note=reg & 0xFF, value=data & 0xFF, part=part))
                     i = k
             elif c == ">":
@@ -1238,6 +1245,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             song.voices.setdefault(no, voice)
     for ev in song.events:
         if ev.kind == "voice" and ev.value not in song.voices:
+            line_info = f" {ev.aux}行目" if ev.aux else ""
             raise ValueError(f"{ev.part}: FM音色 @{ev.value} が定義されていません")
     if song.pcm_file or song.pcm_list:
         song.pcm_slots, song.pcm_rom = load_song_pcm(folder or Path("."), song.pcm_file, song.pcm_list)

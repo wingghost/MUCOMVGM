@@ -17,9 +17,14 @@ def main() -> int:
         return 1
     src = Path(sys.argv[1])
     dst = Path(sys.argv[2]) if len(sys.argv) >= 3 else src.with_suffix(".vgm")
-    song = parse_mml(read_mml_text(src), src.parent)
-    data = compile_song(song)
-    dst.write_bytes(data)
+    try:
+        song = parse_mml(read_mml_text(src), src.parent)
+        data = compile_song(song)
+        dst.write_bytes(data)
+    except Exception as e:
+        print(f"エラー: {e}")
+        return 1
+
     print(f"chip:{song.chip}")
     used_voices = {ev.value for ev in song.events if ev.kind == "voice" and ev.part in FM_PARTS}
     print(f"Used FM voice:{len(used_voices)}")
