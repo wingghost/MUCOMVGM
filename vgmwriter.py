@@ -8,19 +8,12 @@ AY_CLOCK = 2000000
 INTERNAL_WHOLE = 768
 DEFAULT_C = 128
 
-# 同じ値でも再送が必要なレジスタ (port, reg)。重複削除の対象外にする。
-#   (0, 0x10) リズム キーオン/オフ  (0, 0x28) FM キーオン/オフ
-#   (0, 0x0D) SSG エンベロープ形状 (書くたびに再スタート)
-#   (1, 0x00) ADPCM 制御 (書くたびに再生開始/リセット)
-# FNUM/BLOCK は 上位(A4～A6, AC～AE) と 下位(A0～A2, A8～AA) をペアで扱う。
-# 上位は下位を書いた時点で反映されるため、ペアが前回と同じ時だけ両方を省略する。
 FREQ_LO = frozenset({0xA0, 0xA1, 0xA2, 0xA8, 0xA9, 0xAA})
 FREQ_HI = frozenset({0xA4, 0xA5, 0xA6, 0xAC, 0xAD, 0xAE})
 NO_DEDUP_REGS = frozenset({(0, 0x10), (0, 0x28), (0, 0x0D), (1, 0x00)})
 
 
 def is_lockable(port: int, reg: int) -> bool:
-    # y コマンドで書いた値を、自動の書き直しから守れるレジスタ (FM の音色/B0～B6、SSG の 0x00～0x0C)
     return 0x30 <= reg <= 0x9F or 0xB0 <= reg <= 0xB2 or 0xB4 <= reg <= 0xB6 or (port == 0 and reg <= 0x0C)
 
 
@@ -51,6 +44,20 @@ class VgmWriter:
         self.freq_hi = {}
         self.pending_wait = 0
         self.locks = {}
+        self.gd3 = {}
+
+    def set_gd3(self, title: str = "", composer: str = "", album: str = "", date: str = "", comment: str = "") -> None:
+        self.gd3 = {
+            "title": title or "",
+            "composer": composer or "",
+            "album": album or "",
+            "date": date or "",
+            "comment": comment or "",
+        }
+
+    def _utf16le_z(self, s: str) -> bytes:
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        return s.encode("utf-16-le") + b"\x00\x00"
 
     def clear_lock(self, port: int, reg: int) -> None:
         self.locks.pop((port, reg), None)
@@ -132,7 +139,6 @@ class VgmWriter:
             self.flush_wait()
             self.loop_offset = len(self.data)
             self.loop_samples = self.samples
-            # ループ復帰時のチップ状態は曲末尾の状態になるため、ここで履歴を捨てて全レジスタを再送させる
             self.reg_cache.clear()
 
     def write_end(self) -> None:
@@ -154,5 +160,23 @@ class VgmWriter:
         if self.loop_offset is not None:
             header[0x1C:0x20] = struct.pack("<I", 256 + self.loop_offset - 0x1C)
             header[0x20:0x24] = struct.pack("<I", self.samples - (self.loop_samples or 0))
-        header[0x04:0x08] = struct.pack("<I", 256 + len(self.data) - 4)
-        return bytes(header) + bytes(self.data)
+
+        gd3_bytes = b""
+        if self.gd3 and any(self.gd3.values()):
+            g = self.gd3
+            fields = [
+                g["title"], g["title"],
+                g["album"], g["album"],
+                "NEC PC-8801", "",
+                g["composer"], g["composer"],
+                g["date"],
+                "MUCOMVGM",
+                g["comment"],
+            ]
+            body = b"".join(self._utf16le_z(f) for f in fields)
+            gd3_bytes = b"Gd3 " + struct.pack("<II", 0x00000100, len(body)) + body
+            gd3_pos = 256 + len(self.data)
+            header[0x14:0x18] = struct.pack("<I", gd3_pos - 0x14)
+
+        header[0x04:0x08] = struct.pack("<I", 256 + len(self.data) + len(gd3_bytes) - 4)
+        return bytes(header) + bytes(self.data) + gd3_bytes

@@ -77,6 +77,13 @@ def used_pcm_numbers(events) -> set:
 
 def compile_song(song: Song) -> bytes:
     vgm = VgmWriter(song.chip, song.chip_clock)
+    vgm.set_gd3(
+        title=song.title,
+        composer=song.composer,
+        album=song.album,
+        date=song.date,
+        comment=song.comment,
+    )
     init_fm(vgm)
     pcm_slots, pcm_rom = trim_pcm(song.pcm_slots, song.pcm_rom, used_pcm_numbers(song.events))
     write_rom(vgm, pcm_rom)
@@ -99,6 +106,7 @@ def compile_song(song: Song) -> bytes:
     env = {p: new_env() for p in SSG_PARTS}
     rev = {p: {"on": False, "val": 0, "mode": 1, "tail": False, "vol": 0} for p in ALL_PARTS}
     held = {p: None for p in ALL_PARTS}
+    last_note = {p: None for p in ALL_PARTS}
     note_gen = {p: 0 for p in ALL_PARTS}
     hw_env = {p: False for p in SSG_PARTS}
     hw_shape = {p: 0 for p in SSG_PARTS}
@@ -170,7 +178,13 @@ def compile_song(song: Song) -> bytes:
         return max(1, ticks_to_samples(max(1, INTERNAL_WHOLE // max(1, clock_c)), song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
 
     def reset_mod(st):
-        st.update(delay_left=max(0, st["delay"]), step_left=max(1, st["step"]), peak_left=max(1, st["count"] // 2), delta=st["depth"], offset=0)
+        st.update(
+            delay_left=max(0, st["delay"]),
+            step_left=max(1, st["step"]),
+            peak_left=st["count"] // 2,
+            delta=st["depth"],
+            offset=0,
+        )
 
     def step_mod(st):
         if st["delay_left"] > 0:
@@ -182,7 +196,7 @@ def compile_song(song: Song) -> bytes:
         st["step_left"] = max(1, st["step"])
         if st["peak_left"] == 0:
             st["delta"] = -st["delta"]
-            st["peak_left"] = max(0, st["count"])
+            st["peak_left"] = st["count"]
         st["peak_left"] -= 1
         st["offset"] += st["delta"]
         return True
@@ -192,7 +206,6 @@ def compile_song(song: Song) -> bytes:
     ssg_port = 0 if song.chip == "ym2608" else 2
 
     def unlock(port, reg, seq):
-        # ロックより後に書かれたコマンド (通し番号が大きいもの) だけが、ロックを解除できる
         if lock_seq.get((port, reg), -1) < seq:
             vgm.clear_lock(port, reg)
             lock_seq.pop((port, reg), None)
@@ -218,22 +231,23 @@ def compile_song(song: Song) -> bytes:
             unlock(ssg_port, reg, seq)
 
     def rewrite_pitch(part):
-        if held[part] is None or part in (RHYTHM_PART, ADPCM_PART):
+        note = held[part] if held[part] is not None else last_note[part]
+        if note is None or part in (RHYTHM_PART, ADPCM_PART):
             return
         if part in SSG_PARTS:
-            write_ssg_pitch(ay, part, held[part], detune[part], lfo[part]["offset"] if lfo[part]["on"] else 0)
+            write_ssg_pitch(ay, part, note, detune[part], lfo[part]["offset"] if lfo[part]["on"] else 0)
             flush_ssg(vgm, ay)
         elif ext_mode and part in FM3_PARTS:
             _, sdt, ops = fm3_args(part)
-            write_ch3_slots(vgm, held[part], detune[part] + lfo[part]["offset"], sdt, ops)
+            write_ch3_slots(vgm, note, detune[part] + lfo[part]["offset"], sdt, ops)
         elif part in FM_PARTS:
-            write_pitch(vgm, part, held[part], detune[part] + lfo[part]["offset"])
+            write_pitch(vgm, part, note, detune[part] + lfo[part]["offset"])
 
     def write_wait_mod(samples):
         left = samples
         while left > 0:
-            active = [p for p in MOD_PARTS if held[p] is not None and lfo[p]["on"] and lfo[p]["depth"] and lfo[p]["count"]]
-            active_trem = [p for p in MOD_PARTS if held[p] is not None and trem[p]["on"] and trem[p]["depth"] and trem[p]["count"]]
+            active = [p for p in MOD_PARTS if lfo[p]["on"] and lfo[p]["depth"] and lfo[p]["count"]]
+            active_trem = [p for p in MOD_PARTS if trem[p]["on"] and trem[p]["depth"] and trem[p]["count"]]
             active_env = [p for p in SSG_PARTS if env[p]["on"] and env[p]["phase"] != "off" and not hw_env[p]]
             if not active and not active_trem and not active_env:
                 vgm.write_wait(left)
@@ -275,13 +289,14 @@ def compile_song(song: Song) -> bytes:
                 at = ev.tick + ev.duration * i // clocks
                 out.append(MusicEvent("porta_step", at, note=ev.note, value=ev.value, part=ev.part, duration=i, aux=clocks))
         return out
+
     if song.chip == "ym2608":
         vgm.write_ym2608(0, 0x10, 0x80)
         write_rhythm_levels()
         if ext_mode:
             vgm.write_ym2608(0, 0x27, 0x40)
+
     def ev_key(e):
-        # ポルタメントの最後のステップは、同じ時刻の次の音符より先に実行する (後だと次の音符の音程を上書きしてしまう)
         rank = 2 if e.kind == "porta_step" and e.duration >= e.aux else order.get(e.kind, 9)
         return (e.tick, rank, e.part)
 
@@ -454,9 +469,14 @@ def compile_song(song: Song) -> bytes:
                 if not ev.legato:
                     reset_mod(lfo[ev.part])
                     reset_mod(trem[ev.part])
+                    if lfo[ev.part]["on"]:
+                        step_mod(lfo[ev.part])
+                    if trem[ev.part]["on"]:
+                        step_mod(trem[ev.part])
                     if env[ev.part]["on"] and not hw_env[ev.part]:
                         start_env(env[ev.part])
                 held[ev.part] = ev.note
+                last_note[ev.part] = ev.note
                 ay.set_mixer(SSG_CH[ev.part], mixer[ev.part])
                 write_ssg_pitch(ay, ev.part, ev.note, detune[ev.part], lfo[ev.part]["offset"] if lfo[ev.part]["on"] else 0)
                 flush_ssg(vgm, ay)
@@ -475,8 +495,13 @@ def compile_song(song: Song) -> bytes:
                 if not ev.legato:
                     reset_mod(lfo[ev.part])
                     reset_mod(trem[ev.part])
+                    if lfo[ev.part]["on"]:
+                        step_mod(lfo[ev.part])
+                    if trem[ev.part]["on"]:
+                        step_mod(trem[ev.part])
                     refresh_voice(ev.part)
                 held[ev.part] = ev.note
+                last_note[ev.part] = ev.note
                 eff, sdt, ops = fm3_args(ev.part)
                 key_on(vgm, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_on" and ev.part in FM_PARTS:

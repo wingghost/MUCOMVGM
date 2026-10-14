@@ -6,8 +6,11 @@ from pathlib import Path
 from driver import compile_song
 from mmlparser import ALL_PARTS, FM_PARTS, parse_mml, read_mml_text
 
+VERSION = "0.0.7"
+
 
 def main() -> int:
+    print(f"MUCOMVGM Ver.{VERSION}")
     if len(sys.argv) < 2:
         exe = "mucomvgm.exe" if getattr(sys, "frozen", False) else "python mucomvgm.py"
         print(f"使い方: {exe} test.muc")

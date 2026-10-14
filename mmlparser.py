@@ -109,6 +109,10 @@ class PartState:
 @dataclass
 class Song:
     title: str = ""
+    composer: str = ""
+    album: str = ""
+    date: str = ""
+    comment: str = ""
     chip: str = "ym2608"
     chip_clock: int = YM2608_CLOCK
     tick_rate: int = INTERNAL_WHOLE
@@ -1172,6 +1176,18 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             continue
         if low.startswith("#title"):
             song.title = line[6:].strip()
+            continue
+        if low.startswith("#composer"):
+            song.composer = line[9:].strip()
+            continue
+        if low.startswith("#album"):
+            song.album = line[6:].strip()
+            continue
+        if low.startswith("#date"):
+            song.date = line[5:].strip()
+            continue
+        if low.startswith("#comment"):
+            song.comment = line[8:].strip()
             continue
         if low.startswith("#voice"):
             song.voice_file = line.split(maxsplit=1)[1].strip() if len(line.split()) > 1 else ""

@@ -33,6 +33,14 @@ snare.wav
 
 WAV は 16kHz/16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
 
+## VGMのGD3タグの対応
+
+#title  
+#composer  
+#album  
+#date  
+#comment  
+
 ## MUCOM88と違うコマンド
 
 l%      前にスペースが入っている「 %」と同等です。クロック単位での音長設定。  
@@ -73,6 +81,11 @@ L/M/Nはほとんどのコマンドを書くことができるが、Sコマン�
 MIT License。詳細は LICENSE.txt を見てください。
 
 ## 更新履歴
+
+2026/10/13 Ver.0.0.7  
+    - VGMのGD3タグに対応  
+    - LFOでKey Off後に効かなくなるのを修正
+    - その他LFOの不具合を修正
 
 2026/10/13 Ver.0.0.6  
     - LFOのバグを修正  
