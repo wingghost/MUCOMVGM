@@ -524,7 +524,7 @@ def fine_reverb_volume(volume_fine, rev_val):
     return clamp(((volume_fine + rev_val * 8 + 4) // 2) - 4, 0, 127)
 
 
-def parse_porta_body(mml, start, end, octave, def_len, def_clocks, clock_c, transpose, lo):
+def parse_porta_body(mml, start, end, octave, def_len, def_clocks, clock_c, transpose, lo, part, source_pos):
     i, notes, duration = start, [], None
     while i < end:
         c = mml[i]
@@ -547,7 +547,7 @@ def parse_porta_body(mml, start, end, octave, def_len, def_clocks, clock_c, tran
                 duration, i = parse_duration_spec(mml, i, end, def_len, def_clocks, clock_c)
         i += 1
     if not notes:
-        line_no, _ = source_pos(i)
+        line_no, _ = source_pos(start)
         raise ValueError(f"{part} {line_no + 1}行目: ポルタメントに音符がありません")
     return notes[0], notes[-1], duration or note_duration(def_len, False), octave
 
@@ -592,9 +592,9 @@ def parse_part_mml(song, part, mml, state, line_map=None):
         # 連結したパートの文字位置 i が、ファイルの何番目の行の何文字目か
         if not line_map:
             return (0, i)
-        for end, line_idx, start in line_map:
+        for end, orig_line, start in line_map:
             if i < end:
-                return (line_idx, i - start)
+                return (orig_line, i - start)
         return (line_map[-1][1], i - line_map[-1][2])
 
     def remember(note, duration):
@@ -687,7 +687,7 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                 continue
             if c == "{":
                 close = find_brace_end(mml, i)
-                start_note, end_note, duration, octave = parse_porta_body(mml, i + 1, close, octave, def_len, def_clocks, clock_c, transpose, lo)
+                start_note, end_note, duration, octave = parse_porta_body(mml, i + 1, close, octave, def_len, def_clocks, clock_c, transpose, lo, part, source_pos)
                 i = close
                 j = skip_space(mml, i, end)
                 tied = j < end and mml[j] == "&"
@@ -789,7 +789,7 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                 voice, i = read_number(mml, i, 1)
                 if part not in EXT_PARTS:
                     line_no, _ = source_pos(i)
-                    song.events.append(MusicEvent("voice", tick, value=voice, part=part))
+                    song.events.append(MusicEvent("voice", tick, value=voice, part=part, aux=line_no + 1))
             elif c == "@" and part in SSG_PARTS:
                 no, i = read_number(mml, i, 0)
                 if not 0 <= no <= 255:
@@ -1166,10 +1166,10 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             voice, i = parse_voice_block(lines, i + 1, voice_no)
             song.voices[voice_no] = voice
             continue
-        mml_lines.append(lines[i])
+        mml_lines.append((i, lines[i]))
         i += 1
     states, bodies = {}, {}
-    for line_idx, raw in enumerate(mml_lines):
+    for orig_line, raw in mml_lines:
         line = strip_comment(raw).strip()
         if not line:
             continue
@@ -1210,13 +1210,13 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             continue
         if song.chip != "ym2608" and part not in SSG_PARTS:
             continue
-        bodies.setdefault(part, []).append((line_idx, line[1:].strip()))
+        bodies.setdefault(part, []).append((orig_line, line[1:].strip()))
     # 同じパートの行はすべて繋げて、1回で解析する (行の区切りに結果が左右されないようにする)
     for part, entries in bodies.items():
         pieces, line_map, total = [], [], 0
-        for line_idx, text in entries:
+        for orig_line, text in entries:
             piece = "".join(ch for ch in expand_macros(text, song.macros) if not ch.isspace())
-            line_map.append((total + len(piece), line_idx, total))
+            line_map.append((total + len(piece), orig_line, total))
             pieces.append(piece)
             total += len(piece)
         body = "".join(pieces)
@@ -1246,7 +1246,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
     for ev in song.events:
         if ev.kind == "voice" and ev.value not in song.voices:
             line_info = f" {ev.aux}行目" if ev.aux else ""
-            raise ValueError(f"{ev.part}: FM音色 @{ev.value} が定義されていません")
+            raise ValueError(f"{ev.part}{line_info}: FM音色 @{ev.value} が定義されていません")
     if song.pcm_file or song.pcm_list:
         song.pcm_slots, song.pcm_rom = load_song_pcm(folder or Path("."), song.pcm_file, song.pcm_list)
     apply_jump(song)
