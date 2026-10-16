@@ -171,7 +171,6 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         part = part_line[0].upper()
         if part not in ALL_PARTS or len(part_line) < 2:
             continue
-        # チップが複数ある場合は番号必須
         chips = getattr(song, "chips", [])
         if len(chips) > 1 and ":" not in line[:4]:
             raise MMLError("chip.need_prefix", part=part)
