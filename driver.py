@@ -320,7 +320,7 @@ def compile_song(song: Song) -> bytes:
         chip = getattr(ev, "chip", 0)
         chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
         if chip_name == "ym2151":
-            print(f"OPM event: {ev.kind} part={ev.part} chip={chip}")
+            pass
             # continue  # YM2151は後回し
         cur_seq = seq_of.get(id(ev), 0)
         now = max(ev.tick, 0)

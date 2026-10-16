@@ -178,5 +178,5 @@ class VgmWriter:
 
     def write_ym2151(self, chip: int, reg: int, value: int) -> None:
         self.flush_wait()
-        cmd = 0x54 if chip == 0 else 0xA4  # secondary
-        self.data += bytes((cmd, reg & 0xFF, value & 0xFF))
+        # YM2151が何番目のチップでも、YM2151としては1つ目なので 0x54 を使う
+        self.data += bytes((0x54, reg & 0xFF, value & 0xFF))

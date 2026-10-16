@@ -44,11 +44,12 @@ def signed_dt_to_opn(dt: int) -> int:
 
 def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
     slots = []
-    amons = []
+    raw_ops = []
     for op in ops:
-        ar, dr, sr, rr, sl, tl, ks, ml, dt = op[:9]
+        ar, dr, sr, rr, sl, tl, ks, ml, dt = (op + [0] * 11)[:9]
+        dt2 = op[9] if len(op) > 9 else 0
         amon = op[10] if len(op) > 10 else 0
-        amons.append(1 if amon else 0)
+        raw_ops.append((ar, dr, sr, rr, sl, tl, ks, ml, dt, dt2, amon))
         slots.append((
             (clamp(signed_dt_to_opn(dt), 0, 7) << 4) | clamp(ml, 0, 15),
             clamp(tl, 0, 127),
@@ -57,7 +58,7 @@ def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
             clamp(sr, 0, 31),
             (clamp(sl, 0, 15) << 4) | clamp(rr, 0, 15),
         ))
-    return clamp(al, 0, 7), clamp(fb, 0, 7), slots, tuple(amons)
+    return clamp(al, 0, 7), clamp(fb, 0, 7), slots, tuple(raw_ops)
 
 
 def init_fm(vgm) -> None:
