@@ -140,12 +140,15 @@ class VgmWriter:
         header = bytearray(256)
         header[0:4] = b"Vgm "
         header[8:12] = struct.pack("<I", 0x171)
-        # Primary YM2608
-        if self.chips and self.chips[0]["name"] == "ym2608":
-            header[0x48:0x4C] = struct.pack("<I", self.chips[0]["clock"])
-        # Secondary YM2608 (bit 30 set)
-        if len(self.chips) > 1 and self.chips[1]["name"] == "ym2608":
-            header[0x48:0x4C] = struct.pack("<I", self.chips[0]["clock"] | 0x40000000)
+        # YM2608
+        for i, c in enumerate(self.chips):
+            if c["name"] == "ym2608":
+                if i == 0:
+                    header[0x48:0x4C] = struct.pack("<I", c["clock"])
+                else:
+                    header[0x48:0x4C] = struct.pack("<I", self.chips[0]["clock"] | 0x40000000)
+            elif c["name"] == "ym2151":
+                header[0x30:0x34] = struct.pack("<I", c["clock"])
         header[0x18:0x1C] = struct.pack("<I", self.samples)
         header[0x24:0x28] = struct.pack("<I", SAMPLE_RATE)
         header[0x34:0x38] = struct.pack("<I", 256 - 0x34)
