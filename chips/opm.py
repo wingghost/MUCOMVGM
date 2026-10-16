@@ -4,7 +4,8 @@ from chips.opn import CARRIERS, clamp, signed_dt_to_opn
 
 # YM2151 channel mapping: A=0 ... H=7
 OPM_CH = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6, "H": 7}
-OPM_SLOT = (0, 8, 16, 24)  # base + channel for each operator
+OPM_SLOT = (0, 16, 8, 24)  # base + channel for each operator
+OPM_NOTE_CODE = (14, 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13)  # C, C#, D, ... B → KCのノートコード(Cは1つ下のオクターブ側)
 
 def write_opm(vgm, chip: int, reg: int, value: int) -> None:
     vgm.write_ym2151(chip, reg, value)
@@ -26,8 +27,7 @@ def apply_voice_opm(vgm, chip: int, part: str, voice_id: int, volume: int, voice
     carriers = set(CARRIERS.get(clamp(alg, 0, 7), (3,)))
     carrier_idx.clear()
     carrier_idx.update(carriers)
-    # 標準スロット: M1=0, M2=8, C1=16, C2=24
-    for index, base in enumerate((0, 8, 16, 24)):
+    for index, base in enumerate(OPM_SLOT):
         if index >= len(raw_ops):
             break
         ar, dr, sr, rr, sl, tl, ks, ml, dt, dt2, amon = raw_ops[index]
@@ -46,10 +46,14 @@ def key_on_opm(vgm, chip: int, part: str, note: int, detune: int, legato: bool =
     if part not in OPM_CH:
         return
     ch = OPM_CH[part]
-    # KC / KF
-    block = note // 12
-    kf = (note % 12) * 64 // 12 + (detune & 63)
-    write_opm(vgm, chip, 0x28 + ch, (clamp(block, 0, 7) << 4) | (kf & 0x3F))
+    # KC / KF(detune は KF の1単位=半音の1/64 として扱う)
+    total = max(0, note) * 64 + detune
+    semitone, kf = divmod(total, 64)
+    block, name = divmod(semitone, 12)
+    octave = block - 1 if name == 0 else block
+    octave = clamp(octave, 0, 7)
+    write_opm(vgm, chip, 0x28 + ch, (octave << 4) | OPM_NOTE_CODE[name])
+    write_opm(vgm, chip, 0x30 + ch, kf << 2)
     if not legato:
         write_opm(vgm, chip, 0x08, 0x78 | ch)  # all slots on
 
