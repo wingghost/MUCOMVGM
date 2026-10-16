@@ -131,7 +131,9 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             if name not in ("ym2608", "ym2151"):
                 raise MMLError("chip.unsupported", name=name)
             clock = int(parts[3]) if len(parts) > 3 else (YM2608_CLOCK if name == "ym2608" else 3579545)
-            song.chips.append(ChipInfo(no, name, clock))
+            if not hasattr(song, "chips"):
+                song.chips = []
+            song.chips.append(type("Chip", (), {"no": no, "name": name, "clock": clock})())
             continue
         if low.startswith("#title"):
             song.title = line[6:].strip()
@@ -170,11 +172,12 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         if part not in ALL_PARTS or len(part_line) < 2:
             continue
         # チップが複数ある場合は番号必須
-        if len(song.chips) > 1 and ":" not in line[:4]:
+        chips = getattr(song, "chips", [])
+        if len(chips) > 1 and ":" not in line[:4]:
             raise MMLError("chip.need_prefix", part=part)
         bodies.setdefault((chip_no, part), []).append((orig_line, part_line[1:].strip()))
     # 同じパートの行はすべて繋げて、1回で解析する (行の区切りに結果が左右されないようにする)
-    for part, entries in bodies.items():
+    for (chip_no, part), entries in bodies.items():
         pieces, line_map, total = [], [], 0
         for orig_line, text in entries:
             piece = "".join(ch for ch in expand_macros(text, song.macros) if not ch.isspace())
@@ -185,7 +188,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         if body.count("[") > body.count("]"):
             raise MMLError("loop.unclosed", part=part)
         state = PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15)
-        states[part] = state
+        states[(chip_no, part)] = state
         parse_part_mml(song, part, body, state, line_map)
     if song.loop_candidates:
         first = min(song.loop_candidates, key=lambda cand: cand[0])
