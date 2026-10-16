@@ -6,6 +6,7 @@ from chips.opn import (
     CARRIERS, FM3_PARTS, FM_PARTS, PORT, REG_CH, SLOT_MAP, apply_voice, init_fm, key_off, key_on, write_b4,
     scaled_pitch, split_pitch, write_ch3_porta, write_ch3_slots, write_fnum, write_pitch,
 )
+from messages import MMLError
 from mmlparser import ADPCM_PART, ALL_PARTS, MOD_PARTS, RHYTHM_PART, MusicEvent, Song, fm_reverb_volume, fine_reverb_volume, ssg_reverb_volume
 from vgmwriter import DEFAULT_C, INTERNAL_WHOLE, VgmWriter, clamp, ticks_to_samples
 
@@ -318,7 +319,7 @@ def compile_song(song: Song) -> bytes:
             apply_ssg_preset(ev.part, ev.value)
         elif ev.kind == "pcm":
             if song.pcm_slots and ev.value not in song.pcm_slots:
-                raise ValueError(f"PCM @{ev.value} が定義されていません")
+                raise MMLError("pcm.undefined", no=ev.value)
             pcm_voice = ev.value
         elif ev.kind == "pcm_vm":
             pcm_vm, pcm_bias = True, ev.value
@@ -454,7 +455,7 @@ def compile_song(song: Song) -> bytes:
                 held[ev.part] = ev.note
                 continue
             if pcm_voice not in song.pcm_slots:
-                raise ValueError(f"PCM @{pcm_voice} が定義されていません")
+                raise MMLError("pcm.undefined", no=pcm_voice)
             start, end, _base = pcm_slots[pcm_voice]
             held[ev.part] = ev.note
             if same:

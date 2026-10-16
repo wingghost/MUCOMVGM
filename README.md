@@ -10,9 +10,17 @@ PC-8801 の MUCOM88 / MUCOM88win 向けに書いた MML を、MDPlayer などで
 
 mucomvgm.exe song.muc
 
-同じフォルダに `song.vgm` ができます。出力名を指定する場合は次です。
+同じフォルダに `song.vgm` ができます。
 
 mucomvgm.exe song.muc out.vgm
+
+`out.vgm` でvgmファイルが作成されます。
+
+mucomvgm.exe --lang en song.muc
+
+エラーメッセージが英語で表示されます。デフォルトは日本語ですが指定したい場合は `ja` です。
+
+## .muc ファイルのヘッダー部
 
 プリセットの音色ファイルを使う場合は、`.muc` と同じフォルダに VOICE ファイルを置きます。
 
@@ -22,16 +30,17 @@ ADPCM を使う曲は、`.muc` と同じフォルダに PCM ファイルを置�
 
 #pcm mucompcm.bin
 
-新規の WAV を使う場合は、リストを書きます。番号は 1 から 32 です。
+新規の WAV を使う場合は、リストを書きます。
 
 #pcmlist pcmlist.txt
 
-pcmlist.txt の中身は、番号とファイル名です。
+pcmlist.txt の中身は、ファイル名です。番号は上から 1 から 32 です。
 
 kick.wav  
 snare.wav  
 
 WAV は 16kHz/16bit モノラルです。16kHz 以外は変換時に 16kHz へ合わせます。
+#pcm と #pcmlist 両方が書かれていた場合、 #pcm が優先されます。
 
 ## VGMのGD3タグの対応
 
@@ -82,11 +91,12 @@ MIT License。詳細は LICENSE.txt を見てください。
 
 ## 更新履歴
 
-2026/10/14 Ver.0.0.7  
+2026/10/16 Ver.0.0.7  
     - VGMのGD3タグに対応  
     - LFOでKey Off後に効かなくなるのを修正  
     - その他LFOの不具合を修正  
-    - エラーメッセージに行数表示
+    - エラーメッセージに行数表示  
+    - エラーメッセージの多言語化  
 
 2026/10/13 Ver.0.0.6  
     - LFOのバグを修正  

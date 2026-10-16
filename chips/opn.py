@@ -70,8 +70,6 @@ def write_b4(vgm, part, pan, pms, ams) -> None:
 
 
 def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx, ops=0xF) -> None:
-    if voice_id not in voices:
-        raise ValueError(f"音色 @{voice_id} が定義されていません")
     alg, fb, slots = voices[voice_id]
     port, ch = PORT[part], REG_CH[part]
     vgm.write_ym2608(port, 0xB0 + ch, (clamp(fb, 0, 7) << 3) | clamp(alg, 0, 7))

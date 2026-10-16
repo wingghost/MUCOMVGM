@@ -3,6 +3,8 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+from messages import MMLError
+
 PCM_SLOTS = 32
 PCM_INFO = 0x400
 PCM_ADDR_UNIT = 4
@@ -19,7 +21,7 @@ def word(buf: bytes, pos: int) -> int:
 
 def parse_mucompcm(data: bytes) -> tuple[dict[int, tuple[int, int, int]], bytes]:
     if len(data) < PCM_INFO:
-        raise ValueError("PCMファイルが小さすぎます")
+        raise MMLError("pcm.file_small")
     found = []
     for i in range(PCM_SLOTS):
         ent = data[i * 32:(i + 1) * 32]
@@ -46,7 +48,7 @@ def load_pcm(folder: Path, name: str) -> tuple[dict[int, tuple[int, int, int]], 
 def read_wav(path: Path) -> tuple[list[int], int]:
     data = path.read_bytes()
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-        raise ValueError(f"{path.name} は WAV ではありません")
+        raise MMLError("wav.not_wav", name=path.name)
     pos, rate, samples = 12, 0, []
     while pos + 8 <= len(data):
         tag = data[pos:pos + 4]
@@ -54,16 +56,16 @@ def read_wav(path: Path) -> tuple[list[int], int]:
         body = data[pos + 8:pos + 8 + size]
         if tag == b"fmt ":
             if int.from_bytes(body[0:2], "little") != 1 or int.from_bytes(body[2:4], "little") != 1:
-                raise ValueError(f"{path.name} は 16bit モノラルにしてください")
+                raise MMLError("wav.format", name=path.name)
             if int.from_bytes(body[14:16], "little") != 16:
-                raise ValueError(f"{path.name} は 16bit モノラルにしてください")
+                raise MMLError("wav.format", name=path.name)
             rate = int.from_bytes(body[4:8], "little")
         elif tag == b"data":
             count = len(body) // 2
             samples = list(struct.unpack("<" + "h" * count, body[:count * 2]))
         pos += 8 + size + (size & 1)
     if not samples or not rate:
-        raise ValueError(f"{path.name} を読めません")
+        raise MMLError("wav.unreadable", name=path.name)
     return samples, rate
 
 
@@ -131,7 +133,7 @@ def append_pcm(slots, rom, folder: Path, list_name: str) -> None:
             no, name = next_no, line.strip('"')
         next_no = no + 1
         if not 1 <= no <= PCM_SLOTS:
-            raise ValueError(f"PCM @{no} は 1～32 です")
+            raise MMLError("pcm.range", no=no)
         src = folder / name
         if not src.is_file():
             continue
