@@ -172,3 +172,8 @@ class VgmWriter:
 
         header[0x04:0x08] = struct.pack("<I", 256 + len(self.data) + len(gd3_bytes) - 4)
         return bytes(header) + bytes(self.data) + gd3_bytes
+
+    def write_ym2151(self, chip: int, reg: int, value: int) -> None:
+        self.flush_wait()
+        cmd = 0x54 if chip == 0 else 0xA4  # secondary
+        self.data += bytes((cmd, reg & 0xFF, value & 0xFF))

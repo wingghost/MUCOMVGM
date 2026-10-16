@@ -44,6 +44,7 @@ def main() -> int:
     except Exception as e:
         print(tr("cli.error", msg=str(e)))
         return 1
+
     if song.chips:
         chip_str = ",".join(f"{c.no}:{c.name}" for c in song.chips)
         print(f"chips:{chip_str}")
@@ -52,10 +53,20 @@ def main() -> int:
     used_voices = {ev.value for ev in song.events if ev.kind == "voice" and ev.part in FM_PARTS}
     print(f"Used FM voice:{len(used_voices)}")
     print("[ Total count ]")
-    print("".join(f"{part}:{song.part_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
+    if song.chips and len(song.chips) > 1:
+        for key, clocks in sorted(song.part_clocks.items()):
+            print(f"{key}:{clocks} ", end="")
+        print()
+    else:
+        print("".join(f"{part}:{song.part_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
     if song.loop_tick is not None:
         print("[ Loop count  ]")
-        print("".join(f"{part}:{song.part_loop_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
+        if song.chips and len(song.chips) > 1:
+            for key, clocks in sorted(song.part_loop_clocks.items()):
+                print(f"{key}:{clocks} ", end="")
+            print()
+        else:
+            print("".join(f"{part}:{song.part_loop_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
     return 0
 
 

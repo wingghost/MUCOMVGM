@@ -6,6 +6,7 @@ from chips.opn import (
     CARRIERS, FM3_PARTS, FM_PARTS, PORT, REG_CH, SLOT_MAP, apply_voice, init_fm, key_off, key_on, write_b4,
     scaled_pitch, split_pitch, write_ch3_porta, write_ch3_slots, write_fnum, write_pitch,
 )
+from chips.opm import apply_voice_opm, key_on_opm, key_off_opm
 from messages import MMLError
 from mmlparser import ADPCM_PART, ALL_PARTS, MOD_PARTS, RHYTHM_PART, MusicEvent, Song, fm_reverb_volume, fine_reverb_volume, ssg_reverb_volume
 from vgmwriter import DEFAULT_C, INTERNAL_WHOLE, VgmWriter, clamp, ticks_to_samples
@@ -176,7 +177,11 @@ def compile_song(song: Song) -> bytes:
             return
         if part in FM3_PARTS and part != "C" and ex_ops[part] == 0xF:
             return
-        apply_voice(vgm, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan[vp], vol_mode[part], pms[vp], ams[vp], amon[vp], base_tl[part], carrier_idx[part], (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF)
+        chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+        if chip_name == "ym2151":
+            apply_voice_opm(vgm, chip, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan.get(vp, 3), vol_mode[part], base_tl[part], carrier_idx[part])
+            return
+        apply_voice(vgm, chip, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan[vp], vol_mode[part], pms[vp], ams[vp], amon[vp], base_tl[part], carrier_idx[part], (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF)
         off = trem[part]["offset"] if trem[part]["on"] else 0
         for index, slot in enumerate(SLOT_MAP[part]):
             if index in carrier_idx[part]:
@@ -242,15 +247,17 @@ def compile_song(song: Song) -> bytes:
         note = held[part] if held[part] is not None else last_note[part]
         if note is None or part in (RHYTHM_PART, ADPCM_PART):
             return
+        chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
         if part in SSG_PARTS:
             write_ssg_pitch(ay, part, note, detune[part], lfo[part]["offset"] if lfo[part]["on"] else 0)
             flush_ssg(vgm, ay)
+        elif chip_name == "ym2151":
+            key_on_opm(vgm, chip, part, note, detune[part] + lfo[part]["offset"], True)
         elif ext_mode and part in FM3_PARTS:
             _, sdt, ops = fm3_args(part)
             write_ch3_slots(vgm, chip, note, detune[part] + lfo[part]["offset"], sdt, ops)
         elif part in FM_PARTS:
-            write_pitch(vgm, part, note, detune[part] + lfo[part]["offset"])
-            # write_pitch 内部で vgm.write_ym2608 を呼んでいる場合は、そこも chip を渡す
+            write_pitch(vgm, chip, part, note, detune[part] + lfo[part]["offset"])
 
     def write_wait_mod(samples):
         left = samples
@@ -386,11 +393,15 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "lfo_ch":
             unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pms[ev.part], ams[ev.part] = ev.note, ev.value
-            write_b4(vgm, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name != "ym2151":
+                write_b4(vgm, chip, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "lfo_amon":
             amon[ev.part][ev.note] = ev.value
-            dr = song.voices[voice[ev.part]][2][ev.note][3] & 0x1F if voice[ev.part] in song.voices else 0
-            vgm.write_ym2608(PORT[ev.part], 0x60 + SLOT_MAP[ev.part][ev.note], ((1 if ev.value else 0) << 7) | dr)
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name != "ym2151":
+                dr = song.voices[voice[ev.part]][2][ev.note][3] & 0x1F if voice[ev.part] in song.voices else 0
+                vgm.write_ym2608(chip, PORT[ev.part], 0x60 + SLOT_MAP[ev.part][ev.note], ((1 if ev.value else 0) << 7) | dr)
         elif ev.kind == "reg":
             if ev.part in SSG_PARTS and song.chip != "ym2608":
                 vgm.write_ssg(ev.note & 0x0F, ev.value, True)
@@ -515,25 +526,36 @@ def compile_song(song: Song) -> bytes:
                     refresh_voice(ev.part)
                 held[ev.part] = ev.note
                 last_note[ev.part] = ev.note
-                eff, sdt, ops = fm3_args(ev.part)
-                key_on(vgm, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
+                chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+                if chip_name == "ym2151":
+                    key_on_opm(vgm, chip, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato)
+                else:
+                    eff, sdt, ops = fm3_args(ev.part)
+                    key_on(vgm, chip, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_on" and ev.part in FM_PARTS:
             note_gen[ev.part] = ev.aux
             if ev.part in FM3_PARTS and not ev.legato:
                 key_ops[ev.part] = ex_ops[ev.part]
             held[ev.part] = ev.note
-            eff, sdt, ops = fm3_args(ev.part)
-            key_on(vgm, ev.part, ev.note, detune[ev.part], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name == "ym2151":
+                key_on_opm(vgm, chip, ev.part, ev.note, detune[ev.part], ev.legato)
+            else:
+                eff, sdt, ops = fm3_args(ev.part)
+                key_on(vgm, chip, ev.part, ev.note, detune[ev.part], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_step" and ev.part in FM_PARTS:
             held[ev.part] = ev.value
-            if ext_mode and ev.part in FM3_PARTS:
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name == "ym2151":
+                key_on_opm(vgm, chip, ev.part, ev.value, detune[ev.part], True)
+            elif ext_mode and ev.part in FM3_PARTS:
                 _, sdt, ops = fm3_args(ev.part)
                 write_ch3_porta(vgm, chip, ev.note, ev.value, detune[ev.part], sdt, ev.duration, ev.aux, ops)
             else:
                 start = scaled_pitch(ev.note, detune[ev.part])
                 end = scaled_pitch(ev.value, detune[ev.part])
                 block, fnum = split_pitch(start + (end - start) * ev.duration // max(1, ev.aux))
-                write_fnum(vgm, ev.part, block, fnum)
+                write_fnum(vgm, chip, ev.part, block, fnum)
         elif ev.kind == "porta_on" and ev.part in SSG_PARTS:
             note_gen[ev.part] = ev.aux
             rev[ev.part]["tail"] = False
@@ -592,7 +614,11 @@ def compile_song(song: Song) -> bytes:
                     ay.set_volume(SSG_CH[ev.part], 0)
                     flush_ssg(vgm, ay)
             elif ev.part in FM_PARTS:
-                key_off(vgm, ev.part, key_ops[ev.part] if ev.part in FM3_PARTS else 0xF, kon if ev.part in FM3_PARTS else None)
+                chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+                if chip_name == "ym2151":
+                    key_off_opm(vgm, chip, ev.part)
+                else:
+                    key_off(vgm, chip, ev.part, key_ops[ev.part] if ev.part in FM3_PARTS else 0xF, kon if ev.part in FM3_PARTS else None)
                 if rev[ev.part]["tail"]:
                     refresh_voice(ev.part)
                     rev[ev.part]["tail"] = False
