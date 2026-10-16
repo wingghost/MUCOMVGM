@@ -306,7 +306,7 @@ def compile_song(song: Song) -> bytes:
                 out.append(MusicEvent("porta_step", at, note=ev.note, value=ev.value, part=ev.part, duration=i, aux=clocks))
         return out
 
-    if song.chip == "ym2608":
+    if song.chip == "ym2608" or (chip_list and chip_list[0]["name"] == "ym2608"):
         vgm.write_ym2608(0, 0, 0x10, 0x80)
         write_rhythm_levels()
         if ext_mode:
@@ -320,7 +320,8 @@ def compile_song(song: Song) -> bytes:
         chip = getattr(ev, "chip", 0)
         chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
         if chip_name == "ym2151":
-            continue  # YM2151は後回し
+            print(f"OPM event: {ev.kind} part={ev.part} chip={chip}")
+            # continue  # YM2151は後回し
         cur_seq = seq_of.get(id(ev), 0)
         now = max(ev.tick, 0)
         write_wait_mod(ticks_to_samples(now - last_tick, song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
@@ -389,7 +390,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "ex":
             ex_ops[ev.part] = ev.value
         elif ev.kind == "lfo22":
-            vgm.write_ym2608(0, 0x22, ev.value & 0xFF)
+            vgm.write_ym2608(chip, 0, 0x22, ev.value & 0xFF)
         elif ev.kind == "lfo_ch":
             unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pms[ev.part], ams[ev.part] = ev.note, ev.value
@@ -407,7 +408,7 @@ def compile_song(song: Song) -> bytes:
                 vgm.write_ssg(ev.note & 0x0F, ev.value, True)
                 lock_seq[(2, ev.note & 0x0F)] = cur_seq
             else:
-                vgm.write_ym2608(ev.duration, ev.note, ev.value, True)
+                vgm.write_ym2608(chip, ev.duration, ev.note, ev.value, True)
                 lock_seq[(1 if ev.duration else 0, ev.note & 0xFF)] = cur_seq
         elif ev.kind == "voice":
             voice[ev.part] = ev.value
@@ -425,7 +426,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "volume" and ev.part == ADPCM_PART:
             volume[ev.part] = clamp(ev.value, 0, 255)
             if not pcm_vm:
-                vgm.write_ym2608(1, 0x0B, volume[ev.part])
+                vgm.write_ym2608(chip, 1, 0x0B, volume[ev.part])
         elif ev.kind == "volume":
             vol_mode[ev.part], volume[ev.part] = "v", ev.value
             if ev.part in SSG_PARTS:
@@ -445,7 +446,12 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "pan":
             unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pan[ev.part] = ev.value
-            write_b4(vgm, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name == "ym2151":
+                # YM2151のパンは音色適用時に反映されるため、ここでは何もしない
+                pass
+            else:
+                write_b4(vgm, chip, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "detune" and ev.part == ADPCM_PART:
             detune[ev.part] = ev.value
             if held[ev.part] is not None:
@@ -470,7 +476,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "note_on" and ev.part == RHYTHM_PART:
             note_gen[ev.part] = ev.aux
             held[ev.part] = rhythm_mask
-            vgm.write_ym2608(0, 0x10, rhythm_mask & 0x3F)
+            vgm.write_ym2608(chip, 0, 0x10, rhythm_mask & 0x3F)
         elif ev.kind == "note_on" and ev.part == ADPCM_PART:
             same = ev.legato and held[ev.part] == ev.note
             note_gen[ev.part] = ev.aux
@@ -586,7 +592,7 @@ def compile_song(song: Song) -> bytes:
                 continue
             mask = held[ev.part] or rhythm_mask
             held[ev.part] = None
-            vgm.write_ym2608(0, 0x10, 0x80 | (mask & 0x3F))
+            vgm.write_ym2608(chip, 0, 0x10, 0x80 | (mask & 0x3F))
         elif ev.kind == "note_off" and ev.part == ADPCM_PART:
             if ev.aux not in (0, note_gen[ev.part]) and ev.aux != 10**9:
                 continue

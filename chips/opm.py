@@ -26,7 +26,18 @@ def apply_voice_opm(vgm, chip: int, part: str, voice_id: int, volume: int, voice
         if not (ops >> index) & 1:
             continue
         slot = ch + OPM_SLOT[index]
-        ar, dr, sr, rr, sl, tl, ks, ml, dt, dt2, amon = (slots[index] + (0, 0, 0))[:11]
+        op = slots[index]
+        ar = op[0] if len(op) > 0 else 0
+        dr = op[1] if len(op) > 1 else 0
+        sr = op[2] if len(op) > 2 else 0
+        rr = op[3] if len(op) > 3 else 0
+        sl = op[4] if len(op) > 4 else 0
+        tl = op[5] if len(op) > 5 else 0
+        ks = op[6] if len(op) > 6 else 0
+        ml = op[7] if len(op) > 7 else 0
+        dt = op[8] if len(op) > 8 else 0
+        dt2 = op[9] if len(op) > 9 else 0
+        amon = op[10] if len(op) > 10 else 0
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl
         write_opm(vgm, chip, 0x30 + slot, (clamp(signed_dt_to_opn(dt), 0, 7) << 4) | clamp(ml, 0, 15))
