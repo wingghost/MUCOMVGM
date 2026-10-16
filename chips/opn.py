@@ -67,16 +67,16 @@ def init_fm(vgm) -> None:
         vgm.write_ym2608(0, reg, val)
 
 
-def write_b4(vgm, part, pan, pms, ams) -> None:
+def write_b4(vgm, chip, part, pan, pms, ams) -> None:
     val = PAN_LR[clamp(pan, 0, 3)] | (clamp(ams, 0, 3) << 4) | clamp(pms, 0, 7)
-    vgm.write_ym2608(PORT[part], 0xB4 + REG_CH[part], val)
+    vgm.write_ym2608(chip, PORT[part], 0xB4 + REG_CH[part], val)
 
 
-def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx, ops=0xF) -> None:
+def apply_voice(vgm, chip, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx, ops=0xF) -> None:
     alg, fb, slots, voice_amon = voices[voice_id]
     port, ch = PORT[part], REG_CH[part]
-    vgm.write_ym2608(port, 0xB0 + ch, (clamp(fb, 0, 7) << 3) | clamp(alg, 0, 7))
-    write_b4(vgm, part, pan, pms, ams)
+    vgm.write_ym2608(chip, port, 0xB0 + ch, (clamp(fb, 0, 7) << 3) | clamp(alg, 0, 7))
+    write_b4(vgm, chip, part, pan, pms, ams)
     tl_add = 127 - clamp(volume, 0, 127) if vol_mode == "V" else V_TL_TABLE[clamp(volume, 0, 15)]
     carriers = set(CARRIERS.get(clamp(alg, 0, 7), (3,))) & {i for i in range(4) if (ops >> i) & 1}
     carrier_idx.clear()
@@ -88,13 +88,13 @@ def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, am
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl
         amon_bit = voice_amon[index] if index < len(voice_amon) else 0
-        vgm.write_ym2608(port, 0x30 + slot, dtml & 0x7F)
-        vgm.write_ym2608(port, 0x40 + slot, out_tl)
-        vgm.write_ym2608(port, 0x50 + slot, ar & 0xDF)
-        vgm.write_ym2608(port, 0x60 + slot, (0x80 if amon_bit else 0) | (dr & 0x1F))
-        vgm.write_ym2608(port, 0x70 + slot, sr & 0x1F)
-        vgm.write_ym2608(port, 0x80 + slot, slrr & 0xFF)
-        vgm.write_ym2608(port, 0x90 + slot, 0)
+        vgm.write_ym2608(chip, port, 0x30 + slot, dtml & 0x7F)
+        vgm.write_ym2608(chip, port, 0x40 + slot, out_tl)
+        vgm.write_ym2608(chip, port, 0x50 + slot, ar & 0xDF)
+        vgm.write_ym2608(chip, port, 0x60 + slot, (0x80 if amon_bit else 0) | (dr & 0x1F))
+        vgm.write_ym2608(chip, port, 0x70 + slot, sr & 0x1F)
+        vgm.write_ym2608(chip, port, 0x80 + slot, slrr & 0xFF)
+        vgm.write_ym2608(chip, port, 0x90 + slot, 0)
 
 
 def block_fnum(note: int, detune: int) -> tuple[int, int]:
@@ -125,55 +125,55 @@ def split_pitch(scaled: int) -> tuple[int, int]:
     return block, min(fnum, FNUM_MAX)
 
 
-def write_fnum(vgm, part, block, fnum) -> None:
+def write_fnum(vgm, chip, part, block, fnum) -> None:
     ch = REG_CH[part]
-    vgm.write_ym2608(PORT[part], 0xA4 + ch, (block << 3) | ((fnum >> 8) & 7))
-    vgm.write_ym2608(PORT[part], 0xA0 + ch, fnum & 0xFF)
+    vgm.write_ym2608(chip, PORT[part], 0xA4 + ch, (block << 3) | ((fnum >> 8) & 7))
+    vgm.write_ym2608(chip, PORT[part], 0xA0 + ch, fnum & 0xFF)
 
 
-def write_pitch(vgm, part, midi_note, detune) -> None:
-    write_fnum(vgm, part, *block_fnum(midi_note, detune))
+def write_pitch(vgm, chip, part, midi_note, detune) -> None:
+    write_fnum(vgm, chip, part, *block_fnum(midi_note, detune))
 
 
-def write_ch3_slots(vgm, midi_note, extra, slot_dt, ops=0xF) -> None:
+def write_ch3_slots(vgm, chip, midi_note, extra, slot_dt, ops=0xF) -> None:
     for index, (dt, (hi, lo)) in enumerate(zip(slot_dt, CH3_FREQ)):
         if not (ops >> index) & 1:
             continue
         block, fnum = block_fnum(midi_note, extra + dt)
-        vgm.write_ym2608(0, hi, (block << 3) | ((fnum >> 8) & 7))
-        vgm.write_ym2608(0, lo, fnum & 0xFF)
+        vgm.write_ym2608(chip, 0, hi, (block << 3) | ((fnum >> 8) & 7))
+        vgm.write_ym2608(chip, 0, lo, fnum & 0xFF)
 
 
-def write_ch3_porta(vgm, start_note, end_note, extra, slot_dt, step, total, ops=0xF) -> None:
+def write_ch3_porta(vgm, chip, start_note, end_note, extra, slot_dt, step, total, ops=0xF) -> None:
     for index, (dt, (hi, lo)) in enumerate(zip(slot_dt, CH3_FREQ)):
         if not (ops >> index) & 1:
             continue
         start = scaled_pitch(start_note, extra + dt)
         end = scaled_pitch(end_note, extra + dt)
         block, fnum = split_pitch(start + (end - start) * step // max(1, total))
-        vgm.write_ym2608(0, hi, (block << 3) | ((fnum >> 8) & 7))
-        vgm.write_ym2608(0, lo, fnum & 0xFF)
+        vgm.write_ym2608(chip, 0, hi, (block << 3) | ((fnum >> 8) & 7))
+        vgm.write_ym2608(chip, 0, lo, fnum & 0xFF)
 
 
-def key_on(vgm, part, midi_note, detune, legato=False, effect=False, slot_dt=None, ops=0xF, kon=None) -> None:
+def key_on(vgm, chip, part, midi_note, detune, legato=False, effect=False, slot_dt=None, ops=0xF, kon=None) -> None:
     if effect and part in FM3_PARTS:
-        write_ch3_slots(vgm, midi_note, detune, slot_dt or [0, 0, 0, 0], ops)
+        write_ch3_slots(vgm, chip, midi_note, detune, slot_dt or [0, 0, 0, 0], ops)
     else:
-        write_pitch(vgm, part, midi_note, detune)
+        write_pitch(vgm, chip, part, midi_note, detune)
     if not legato:
         if kon is None:
-            vgm.write_ym2608(0, 0x28, 0xF0 | KEY_CH[part])
+            vgm.write_ym2608(chip, 0, 0x28, 0xF0 | KEY_CH[part])
         else:
             kon[0] |= ops
-            vgm.write_ym2608(0, 0x28, (kon[0] << 4) | KEY_CH[part])
+            vgm.write_ym2608(chip, 0, 0x28, (kon[0] << 4) | KEY_CH[part])
 
 
-def key_off(vgm, part, ops=0xF, kon=None) -> None:
+def key_off(vgm, chip, part, ops=0xF, kon=None) -> None:
     if kon is None:
-        vgm.write_ym2608(0, 0x28, KEY_CH[part])
+        vgm.write_ym2608(chip, 0, 0x28, KEY_CH[part])
     else:
         kon[0] &= ~ops & 0xF
-        vgm.write_ym2608(0, 0x28, (kon[0] << 4) | KEY_CH[part])
+        vgm.write_ym2608(chip, 0, 0x28, (kon[0] << 4) | KEY_CH[part])
 
 
 def porta_linear(note: int, detune: int) -> int:

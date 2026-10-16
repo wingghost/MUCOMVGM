@@ -33,9 +33,11 @@ def ticks_to_samples(ticks: int, tick_rate: int, tempo: int, tempo_mode: str, ti
 
 
 class VgmWriter:
-    def __init__(self, chip: str, clock: int):
-        self.chip = chip
-        self.clock = clock
+    def __init__(self, chips=None, clock=None):
+        if chips is None:
+            self.chips = [{"name": "ym2608", "clock": clock or YM2608_CLOCK}]
+        else:
+            self.chips = chips
         self.data = bytearray()
         self.samples = 0
         self.loop_offset = None
@@ -84,20 +86,22 @@ class VgmWriter:
                 self.data += bytes((0x61, n & 0xFF, (n >> 8) & 0xFF))
                 left -= n
 
-    def write_ym2608(self, port: int, reg: int, value: int, lock: bool = False) -> None:
+    def write_ym2608(self, chip: int, port: int, reg: int, value: int, lock: bool = False) -> None:
         port, reg, value = 1 if port else 0, reg & 0xFF, value & 0xFF
-        key = (port, reg)
+        key = (chip, port, reg)
         if is_lockable(port, reg):
             if lock:
                 self.locks[key] = value
             elif key in self.locks:
                 value = self.locks[key]
         cmd = 0x57 if port else 0x56
+        if chip >= 1:
+            cmd += 0x50  # secondary chip
         if reg in FREQ_HI:
             self.freq_hi[key] = value
             return
         if reg in FREQ_LO:
-            hi = self.freq_hi.get((port, reg + 4))
+            hi = self.freq_hi.get((chip, port, reg + 4))
             if hi is None:
                 self.reg_cache.pop(key, None)
             else:
@@ -117,22 +121,8 @@ class VgmWriter:
         self.data += bytes((cmd, reg, value))
 
     def write_ssg(self, reg: int, value: int, lock: bool = False) -> None:
-        if self.chip == "ym2608":
-            self.write_ym2608(0, reg & 0x0F, value & 0xFF, lock)
-            return
-        reg, value = reg & 0xFF, value & 0xFF
-        if reg <= 0x0C:
-            if lock:
-                self.locks[(2, reg)] = value
-            elif (2, reg) in self.locks:
-                value = self.locks[(2, reg)]
-        if reg != 0x0D:
-            key = (2, reg)
-            if self.reg_cache.get(key) == value:
-                return
-            self.reg_cache[key] = value
-        self.flush_wait()
-        self.data += bytes((0xA0, reg, value))
+        # SSG is on chip 0 for now
+        self.write_ym2608(0, 0, reg & 0x0F, value & 0xFF, lock)
 
     def mark_loop(self) -> None:
         if self.loop_offset is None:
@@ -150,10 +140,12 @@ class VgmWriter:
         header = bytearray(256)
         header[0:4] = b"Vgm "
         header[8:12] = struct.pack("<I", 0x171)
-        if self.chip == "ym2608":
-            header[0x48:0x4C] = struct.pack("<I", self.clock)
-        else:
-            header[0x74:0x78] = struct.pack("<I", self.clock)
+        # Primary YM2608
+        if self.chips and self.chips[0]["name"] == "ym2608":
+            header[0x48:0x4C] = struct.pack("<I", self.chips[0]["clock"])
+        # Secondary YM2608 (bit 30 set)
+        if len(self.chips) > 1 and self.chips[1]["name"] == "ym2608":
+            header[0x48:0x4C] = struct.pack("<I", self.chips[0]["clock"] | 0x40000000)
         header[0x18:0x1C] = struct.pack("<I", self.samples)
         header[0x24:0x28] = struct.pack("<I", SAMPLE_RATE)
         header[0x34:0x38] = struct.pack("<I", 256 - 0x34)

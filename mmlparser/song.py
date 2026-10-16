@@ -195,12 +195,12 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         dropped = {id(cand[2]) for cand in song.loop_candidates if cand[2] is not first[2]}
         song.events = [e for e in song.events if id(e) not in dropped]
     check_ex_overlap(states)
-    for part, st in states.items():
-        song.part_clocks[part] = st.total_clocks
+    for (chip_no, part), st in states.items():
+        song.part_clocks[f"{chip_no}:{part}"] = st.total_clocks
         if song.loop_tick is not None:
-            song.part_loop_clocks[part] = st.total_clocks - clocks_at_tick(st.marks, max(song.loop_tick, song.jump_tick))
+            song.part_loop_clocks[f"{chip_no}:{part}"] = st.total_clocks - clocks_at_tick(st.marks, max(song.loop_tick, song.jump_tick))
         if st.pending_tie or st.rev_on:
-            song.events.append(MusicEvent("note_off", st.tick, part=part, aux=10**9))
+            song.events.append(MusicEvent("note_off", st.tick, part=part, chip=chip_no, aux=10**9))
     end = max((s.tick for s in states.values()), default=0)
     if end:
         song.events.append(MusicEvent("rest", end, part="A"))

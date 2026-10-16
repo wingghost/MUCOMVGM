@@ -77,7 +77,12 @@ def used_pcm_numbers(events) -> set:
 
 
 def compile_song(song: Song) -> bytes:
-    vgm = VgmWriter(song.chip, song.chip_clock)
+    chips = getattr(song, "chips", [])
+    if chips:
+        chip_list = [{"name": c.name, "clock": c.clock} for c in chips]
+    else:
+        chip_list = [{"name": song.chip, "clock": song.chip_clock}]
+    vgm = VgmWriter(chip_list)
     vgm.set_gd3(
         title=song.title,
         composer=song.composer,
@@ -85,7 +90,9 @@ def compile_song(song: Song) -> bytes:
         date=song.date,
         comment=song.comment,
     )
-    init_fm(vgm)
+    # チップ0がYM2608の場合のみ初期化
+    if chip_list and chip_list[0]["name"] == "ym2608":
+        init_fm(vgm)
     pcm_slots, pcm_rom = trim_pcm(song.pcm_slots, song.pcm_rom, used_pcm_numbers(song.events))
     write_rom(vgm, pcm_rom)
     ay = AyState(ssg_clock(song.chip, song.chip_clock))
@@ -128,9 +135,9 @@ def compile_song(song: Song) -> bytes:
         return False, None, 0xF
 
     def write_rhythm_levels():
-        vgm.write_ym2608(0, 0x11, clamp(rhythm_total, 0, 63))
+        vgm.write_ym2608(0, 0, 0x11, clamp(rhythm_total, 0, 63))
         for i, reg in enumerate(RHYTHM_REG):
-            vgm.write_ym2608(0, reg, RHYTHM_PAN[rhythm_pan[i]] | clamp(rhythm_inst[i], 0, 31))
+            vgm.write_ym2608(0, 0, reg, RHYTHM_PAN[rhythm_pan[i]] | clamp(rhythm_inst[i], 0, 31))
 
     def ssg_out_vol(part):
         if rev[part]["tail"]:
@@ -173,7 +180,7 @@ def compile_song(song: Song) -> bytes:
         off = trem[part]["offset"] if trem[part]["on"] else 0
         for index, slot in enumerate(SLOT_MAP[part]):
             if index in carrier_idx[part]:
-                vgm.write_ym2608(PORT[part], 0x40 + slot, clamp(base_tl[part][index] + off, 0, 127))
+                vgm.write_ym2608(chip, PORT[part], 0x40 + slot, clamp(base_tl[part][index] + off, 0, 127))
 
     def samples_per_clock():
         return max(1, ticks_to_samples(max(1, INTERNAL_WHOLE // max(1, clock_c)), song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
@@ -240,9 +247,10 @@ def compile_song(song: Song) -> bytes:
             flush_ssg(vgm, ay)
         elif ext_mode and part in FM3_PARTS:
             _, sdt, ops = fm3_args(part)
-            write_ch3_slots(vgm, note, detune[part] + lfo[part]["offset"], sdt, ops)
+            write_ch3_slots(vgm, chip, note, detune[part] + lfo[part]["offset"], sdt, ops)
         elif part in FM_PARTS:
             write_pitch(vgm, part, note, detune[part] + lfo[part]["offset"])
+            # write_pitch 内部で vgm.write_ym2608 を呼んでいる場合は、そこも chip を渡す
 
     def write_wait_mod(samples):
         left = samples
@@ -292,16 +300,20 @@ def compile_song(song: Song) -> bytes:
         return out
 
     if song.chip == "ym2608":
-        vgm.write_ym2608(0, 0x10, 0x80)
+        vgm.write_ym2608(0, 0, 0x10, 0x80)
         write_rhythm_levels()
         if ext_mode:
-            vgm.write_ym2608(0, 0x27, 0x40)
+            vgm.write_ym2608(0, 0, 0x27, 0x40)
 
     def ev_key(e):
         rank = 2 if e.kind == "porta_step" and e.duration >= e.aux else order.get(e.kind, 9)
         return (e.tick, rank, e.part)
 
     for ev in sorted(expand_porta(song.events), key=ev_key):
+        chip = getattr(ev, "chip", 0)
+        chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+        if chip_name == "ym2151":
+            continue  # YM2151は後回し
         cur_seq = seq_of.get(id(ev), 0)
         now = max(ev.tick, 0)
         write_wait_mod(ticks_to_samples(now - last_tick, song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
@@ -516,7 +528,7 @@ def compile_song(song: Song) -> bytes:
             held[ev.part] = ev.value
             if ext_mode and ev.part in FM3_PARTS:
                 _, sdt, ops = fm3_args(ev.part)
-                write_ch3_porta(vgm, ev.note, ev.value, detune[ev.part], sdt, ev.duration, ev.aux, ops)
+                write_ch3_porta(vgm, chip, ev.note, ev.value, detune[ev.part], sdt, ev.duration, ev.aux, ops)
             else:
                 start = scaled_pitch(ev.note, detune[ev.part])
                 end = scaled_pitch(ev.value, detune[ev.part])
