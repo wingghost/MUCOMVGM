@@ -71,8 +71,8 @@ def parse_voice_block(lines, start, voice_no):
         vals = parse_nums(strip_comment(row))
         if len(vals) < 9:
             raise MMLError("voice.op_params", no=voice_no, op=n + 1)
-        # 9: DT1 only, 10: +DT2, 11+: +AMON
-        padded = vals[:11] + [0] * (11 - len(vals[:11]))
+        # 9: DT1, 10: DT1+DT2, 11+: DT1+DT2+AMON
+        padded = (vals + [0] * 11)[:11]
         ops.append(padded)
     return pack_voice(nums[0], nums[1], ops), i
 

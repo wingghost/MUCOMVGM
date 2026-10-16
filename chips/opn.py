@@ -46,16 +46,7 @@ def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
     slots = []
     amons = []
     for op in ops:
-        ar = op[0] if len(op) > 0 else 0
-        dr = op[1] if len(op) > 1 else 0
-        sr = op[2] if len(op) > 2 else 0
-        rr = op[3] if len(op) > 3 else 0
-        sl = op[4] if len(op) > 4 else 0
-        tl = op[5] if len(op) > 5 else 0
-        ks = op[6] if len(op) > 6 else 0
-        ml = op[7] if len(op) > 7 else 0
-        dt = op[8] if len(op) > 8 else 0
-        # DT2 is index 9, ignored for YM2608
+        ar, dr, sr, rr, sl, tl, ks, ml, dt = op[:9]
         amon = op[10] if len(op) > 10 else 0
         amons.append(1 if amon else 0)
         slots.append((
