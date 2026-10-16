@@ -10,7 +10,7 @@ from chips.opn import FM3_PARTS
 from messages import MMLError
 from vgmwriter import AY_CLOCK, YM2608_CLOCK
 
-from .model import ADPCM_PART, ALL_PARTS, MusicEvent, PartState, Song
+from .model import ADPCM_PART, ALL_PARTS, ChipInfo, MusicEvent, PartState, Song
 from .part import parse_part_mml
 from .scan import expand_macros, strip_comment
 from .voice import SSG_BUILTIN, load_voice_file, parse_ssg_preset, parse_voice_block, take_ssg_preset
@@ -121,10 +121,17 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         low = line.lower()
         if low.startswith("#chip"):
             parts = line.split()
-            song.chip = parts[1].lower() if len(parts) > 1 else "ym2608"
-            if song.chip not in ("ym2608", "ay8910", "ym2149"):
-                raise MMLError("chip.unsupported")
-            song.chip_clock = int(parts[2]) if len(parts) > 2 else (YM2608_CLOCK if song.chip == "ym2608" else AY_CLOCK)
+            if len(parts) < 3:
+                raise MMLError("chip.need_args")
+            try:
+                no = int(parts[1])
+            except ValueError:
+                raise MMLError("chip.bad_no")
+            name = parts[2].lower()
+            if name not in ("ym2608", "ym2151"):
+                raise MMLError("chip.unsupported", name=name)
+            clock = int(parts[3]) if len(parts) > 3 else (YM2608_CLOCK if name == "ym2608" else 3579545)
+            song.chips.append(ChipInfo(no, name, clock))
             continue
         if low.startswith("#title"):
             song.title = line[6:].strip()
@@ -150,12 +157,22 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         if low.startswith("#pcm"):
             song.pcm_file = line.split(maxsplit=1)[1] if len(line.split()) > 1 else ""
             continue
-        part = line[0].upper()
-        if part not in ALL_PARTS or len(line) < 2:
+        chip_no = 0
+        part_line = line
+        if ":" in line[:4]:
+            prefix, rest = line.split(":", 1)
+            if prefix.isdigit():
+                chip_no = int(prefix)
+                part_line = rest.strip()
+        if not part_line:
             continue
-        if song.chip != "ym2608" and part not in SSG_PARTS:
+        part = part_line[0].upper()
+        if part not in ALL_PARTS or len(part_line) < 2:
             continue
-        bodies.setdefault(part, []).append((orig_line, line[1:].strip()))
+        # チップが複数ある場合は番号必須
+        if len(song.chips) > 1 and ":" not in line[:4]:
+            raise MMLError("chip.need_prefix", part=part)
+        bodies.setdefault((chip_no, part), []).append((orig_line, part_line[1:].strip()))
     # 同じパートの行はすべて繋げて、1回で解析する (行の区切りに結果が左右されないようにする)
     for part, entries in bodies.items():
         pieces, line_map, total = [], [], 0

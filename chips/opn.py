@@ -44,8 +44,20 @@ def signed_dt_to_opn(dt: int) -> int:
 
 def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
     slots = []
+    amons = []
     for op in ops:
-        ar, dr, sr, rr, sl, tl, ks, ml, dt = op[:9]
+        ar = op[0] if len(op) > 0 else 0
+        dr = op[1] if len(op) > 1 else 0
+        sr = op[2] if len(op) > 2 else 0
+        rr = op[3] if len(op) > 3 else 0
+        sl = op[4] if len(op) > 4 else 0
+        tl = op[5] if len(op) > 5 else 0
+        ks = op[6] if len(op) > 6 else 0
+        ml = op[7] if len(op) > 7 else 0
+        dt = op[8] if len(op) > 8 else 0
+        # DT2 is index 9, ignored for YM2608
+        amon = op[10] if len(op) > 10 else 0
+        amons.append(1 if amon else 0)
         slots.append((
             (clamp(signed_dt_to_opn(dt), 0, 7) << 4) | clamp(ml, 0, 15),
             clamp(tl, 0, 127),
@@ -54,7 +66,7 @@ def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
             clamp(sr, 0, 31),
             (clamp(sl, 0, 15) << 4) | clamp(rr, 0, 15),
         ))
-    return clamp(al, 0, 7), clamp(fb, 0, 7), slots
+    return clamp(al, 0, 7), clamp(fb, 0, 7), slots, tuple(amons)
 
 
 def init_fm(vgm) -> None:
@@ -70,7 +82,7 @@ def write_b4(vgm, part, pan, pms, ams) -> None:
 
 
 def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, amon, base_tl, carrier_idx, ops=0xF) -> None:
-    alg, fb, slots = voices[voice_id]
+    alg, fb, slots, voice_amon = voices[voice_id]
     port, ch = PORT[part], REG_CH[part]
     vgm.write_ym2608(port, 0xB0 + ch, (clamp(fb, 0, 7) << 3) | clamp(alg, 0, 7))
     write_b4(vgm, part, pan, pms, ams)
@@ -84,10 +96,11 @@ def apply_voice(vgm, part, voice_id, volume, voices, pan, vol_mode, pms, ams, am
         dtml, tl, ar, dr, sr, slrr = slots[index]
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl
+        amon_bit = voice_amon[index] if index < len(voice_amon) else 0
         vgm.write_ym2608(port, 0x30 + slot, dtml & 0x7F)
         vgm.write_ym2608(port, 0x40 + slot, out_tl)
         vgm.write_ym2608(port, 0x50 + slot, ar & 0xDF)
-        vgm.write_ym2608(port, 0x60 + slot, (0x80 if amon[index] else 0) | (dr & 0x1F))
+        vgm.write_ym2608(port, 0x60 + slot, (0x80 if amon_bit else 0) | (dr & 0x1F))
         vgm.write_ym2608(port, 0x70 + slot, sr & 0x1F)
         vgm.write_ym2608(port, 0x80 + slot, slrr & 0xFF)
         vgm.write_ym2608(port, 0x90 + slot, 0)
@@ -210,4 +223,3 @@ def write_porta(vgm, part, start_note, end_note, detune, clocks, samples_per_clo
                 write_fnum(vgm, part, block, fnum)
             previous = (block, fnum)
         vgm.write_wait(max(1, samples_per_clock))
-        

@@ -25,6 +25,7 @@ class MusicEvent:
     legato: bool = False
     aux: int = 0
     params: tuple = ()
+    chip: int = 0
 
 
 @dataclass
@@ -86,6 +87,13 @@ class PartState:
 
 
 @dataclass
+class ChipInfo:
+    no: int
+    name: str
+    clock: int = YM2608_CLOCK
+
+
+@dataclass
 class Song:
     title: str = ""
     composer: str = ""
@@ -94,6 +102,7 @@ class Song:
     comment: str = ""
     chip: str = "ym2608"
     chip_clock: int = YM2608_CLOCK
+    chips: list[ChipInfo] = field(default_factory=list)
     tick_rate: int = INTERNAL_WHOLE
     events: list[MusicEvent] = field(default_factory=list)
     voices: dict[int, tuple] = field(default_factory=dict)
@@ -111,3 +120,4 @@ class Song:
     pcm_slots: dict = field(default_factory=dict)
     pcm_rom: bytes = b""
     macros: dict[int, str] = field(default_factory=dict)
+    
