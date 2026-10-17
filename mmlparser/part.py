@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from chips.ay8910 import SSG_PARTS
+from chips.opm import OPM_CH, OPM_SLOT, OPM_Y_SLOT_REGS
 from chips.opn import EXT_PARTS, FM3_PARTS, FM_PARTS, SLOT_MAP, Y_SLOT_REGS, lfo22_value, y_port
 from messages import MMLError
 from vgmwriter import INTERNAL_WHOLE, clamp
@@ -50,6 +51,11 @@ def parse_part_mml(song, part, mml, state, line_map=None):
     mml = "".join(ch for ch in mml if not ch.isspace())
     lo = 0 if part == ADPCM_PART else 1
     opm = state.chip_name == "ym2151"
+    chip_lfo = song.chip_lfo.setdefault(state.chip_no, [0, 0])  # [LFO有効, LFO速度]。チップごとに別
+
+    def h_missing(pos):
+        line_no, _ = source_pos(pos)
+        raise MMLError("h.need_number", part=part, line=line_no + 1)
     tick, octave = state.tick, state.octave
     def_len, def_clocks = state.def_len, state.def_clocks
     q, q_mode, q_div = state.q, state.q_mode, state.q_div
@@ -435,36 +441,52 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                 if opm and nxt and nxt in "Ff":
                     # YM2151: HF0 で PMD/AMD を 0 にして LFO を止める。HF1 で直前の Hn1,n2,n3,n4 の値に戻す
                     n, k = read_imm(mml, i + 2, end, None)
-                    i = i + 1 if n is None else k
+                    if n is None:
+                        h_missing(i)
+                    i = k
                     song.events.append(MusicEvent("lfo_opm_on", tick, value=0 if n == 0 else 1, part=part))
                 elif opm and nxt and nxt in "Ww":
                     # YM2151 では HW は使わない(数値だけ読み飛ばす)
                     n, k = read_imm(mml, i + 2, end, None)
-                    i = i + 1 if n is None else k
+                    if n is None:
+                        h_missing(i)
+                    i = k
                 elif nxt in "Ff":
-                    n, i = read_imm(mml, i + 2, end, 1)
-                    song.lfo_enable = 1 if n else 0
-                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(song.lfo_enable, song.lfo_speed), part=part))
+                    n, i = read_imm(mml, i + 2, end, None)
+                    if n is None:
+                        h_missing(i - 2)
+                    chip_lfo[0] = 1 if n else 0
+                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(chip_lfo[0], chip_lfo[1]), part=part))
                 elif nxt in "Ww":
-                    n, i = read_imm(mml, i + 2, end, 0)
-                    song.lfo_speed = clamp(n, 0, 7)
-                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(song.lfo_enable, song.lfo_speed), part=part))
+                    n, i = read_imm(mml, i + 2, end, None)
+                    if n is None:
+                        h_missing(i - 2)
+                    chip_lfo[1] = clamp(n, 0, 7)
+                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(chip_lfo[0], chip_lfo[1]), part=part))
                 elif nxt in "Pp":
-                    n, i = read_imm(mml, i + 2, end, 0)
+                    n, i = read_imm(mml, i + 2, end, None)
+                    if n is None:
+                        h_missing(i - 2)
                     pms = clamp(n, 0, 7)
                     song.events.append(MusicEvent("lfo_ch", tick, note=pms, value=ams, part=part))
                 elif nxt in "Aa":
-                    n, i = read_imm(mml, i + 2, end, 0)
+                    n, i = read_imm(mml, i + 2, end, None)
+                    if n is None:
+                        h_missing(i - 2)
                     ams = clamp(n, 0, 3)
                     song.events.append(MusicEvent("lfo_ch", tick, note=pms, value=ams, part=part))
                 elif nxt in "Mm":
-                    slot, k = read_imm(mml, i + 2, end, 1)
-                    on, i = read_imm(mml, k + 1, end, 1)
+                    slot, k = read_imm(mml, i + 2, end, None)
+                    if slot is None:
+                        h_missing(i)
+                    on, i = read_imm(mml, k + 1, end, None)
+                    if on is None:
+                        h_missing(k)
                     slot_i = clamp(slot, 1, 4) - 1
                     amon[slot_i] = 1 if on else 0
                     song.events.append(MusicEvent("lfo_amon", tick, note=slot_i, value=amon[slot_i], part=part))
                 elif opm:
-                    # YM2151: Hn1,n2,n3,n4 = 波形(0-3), LFO速度(0-255), PMD(0-127), AMD(0-127)。後ろの数値は省略可(省略した分は前の値を保つ)
+                    # YM2151: Hn1,n2,n3,n4 = 波形(0-3), LFO速度(0-255), PMD(0-127), AMD(0-127)。4つとも必須
                     vals, k = [], i
                     for _ in range(4):
                         v, k2 = read_imm(mml, k + 1, end, None)
@@ -473,32 +495,46 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                         vals.append(v)
                         k = k2
                     i = k
+                    if len(vals) < 4:
+                        h_missing(i)
                     vals += [None] * (4 - len(vals))
                     params = tuple(None if v is None else clamp(v, 0, top) for v, top in zip(vals, (3, 255, 127, 127)))
                     song.events.append(MusicEvent("lfo_opm", tick, params=params, part=part))
                 else:
-                    speed, k = read_imm(mml, i + 1, end, 0)
-                    pm, k = read_imm(mml, k + 1, end, 0)
-                    am, i = read_imm(mml, k + 1, end, 0)
-                    song.lfo_enable, song.lfo_speed = 1, clamp(speed, 0, 7)
+                    speed, k = read_imm(mml, i + 1, end, None)
+                    if speed is None:
+                        h_missing(i)
+                    pm, k = read_imm(mml, k + 1, end, None)
+                    if pm is None:
+                        h_missing(i)
+                    am, i = read_imm(mml, k + 1, end, None)
+                    if am is None:
+                        h_missing(k)
+                    chip_lfo[0], chip_lfo[1] = 1, clamp(speed, 0, 7)
                     pms, ams = clamp(pm, 0, 7), clamp(am, 0, 3)
-                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(1, song.lfo_speed), part=part))
+                    song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(1, chip_lfo[1]), part=part))
                     song.events.append(MusicEvent("lfo_ch", tick, note=pms, value=ams, part=part))
             elif c == "y":
                 tag = mml[i + 1:i + 3].upper()
-                if part in FM_PARTS and tag in Y_SLOT_REGS:
+                if part in FM_PARTS and tag in (OPM_Y_SLOT_REGS if opm else Y_SLOT_REGS):
                     slot, k = read_imm(mml, i + 3, end, 1)
                     data, k = read_imm(mml, k + 1, end, 0, 2)
                     slot_i = clamp(slot, 1, 4) - 1
                     if tag == "DR":
                         amon[slot_i] = 1 if data & 0x80 else 0
-                    reg = Y_SLOT_REGS[tag] + SLOT_MAP[part][slot_i]
-                    song.events.append(MusicEvent("reg", tick, duration=y_port(part, reg), note=reg, value=data & 0xFF, part=part))
+                    if opm:
+                        # YM2151: オペレーターのレジスタ = タグの基準 + チャンネル + スロットの位置
+                        if part in OPM_CH:
+                            reg = OPM_Y_SLOT_REGS[tag] + OPM_CH[part] + OPM_SLOT[slot_i]
+                            song.events.append(MusicEvent("reg", tick, duration=0, note=reg, value=data & 0xFF, part=part))
+                    else:
+                        reg = Y_SLOT_REGS[tag] + SLOT_MAP[part][slot_i]
+                        song.events.append(MusicEvent("reg", tick, duration=y_port(part, reg), note=reg, value=data & 0xFF, part=part))
                     i = k
                 else:
                     reg, k = read_imm(mml, i + 1, end, 0)
                     data, k = read_imm(mml, k + 1, end, 0, 2)
-                    if not 0 <= reg <= 0x1FF:
+                    if not 0 <= reg <= (0xFF if opm else 0x1FF):
                         line_no, _ = source_pos(i)
                         raise MMLError("y.reg_range", part=part, line=line_no + 1)
                     song.events.append(MusicEvent("reg", tick, duration=1 if reg >= 0x100 else 0, note=reg & 0xFF, value=data & 0xFF, part=part))

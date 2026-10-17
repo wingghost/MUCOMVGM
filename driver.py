@@ -6,7 +6,7 @@ from chips.opn import (
     CARRIERS, FM3_PARTS, FM_PARTS, PORT, REG_CH, SLOT_MAP, apply_voice, init_fm, key_off, key_on, write_b4,
     scaled_pitch, split_pitch, write_ch3_porta, write_ch3_slots, write_fnum, write_pitch,
 )
-from chips.opm import apply_voice_opm, key_on_opm, key_off_opm
+from chips.opm import OPM_CH, OPM_SLOT, apply_voice_opm, key_on_opm, key_off_opm, write_opm
 from messages import MMLError
 from mmlparser import ADPCM_PART, ALL_PARTS, MOD_PARTS, RHYTHM_PART, MusicEvent, Song, fm_reverb_volume, fine_reverb_volume, ssg_reverb_volume
 from vgmwriter import DEFAULT_C, INTERNAL_WHOLE, VgmWriter, clamp, ticks_to_samples
@@ -68,13 +68,74 @@ def step_env(st):
 
 
 def used_pcm_numbers(events) -> set:
-    used, voice = set(), 1
+    used, voice = set(), {}  # voice: チップ番号 → 選択中のPCM番号
     for ev in sorted(events, key=lambda e: (e.tick, e.kind != "pcm")):
+        no = getattr(ev, "chip", 0)
         if ev.kind == "pcm":
-            voice = ev.value
+            voice[no] = ev.value
         elif ev.part == ADPCM_PART and ev.kind in ("note_on", "porta_on", "porta"):
-            used.add(voice)
+            used.add(voice.get(no, 1))
     return used
+
+
+class PerChip:
+    """パート名で引くと、現在処理中のチップのパート状態を返す。チップごとに別の状態を持つ(テンポだけは共有)。"""
+
+    def __init__(self, current, make, keys):
+        self.current, self.make, self.keys, self.store = current, make, tuple(keys), {}
+
+    def _parts(self):
+        no = self.current[0]
+        if no not in self.store:
+            self.store[no] = {p: self.make(p) for p in self.keys}
+        return self.store[no]
+
+    def __getitem__(self, part):
+        return self._parts()[part]
+
+    def __setitem__(self, part, value):
+        self._parts()[part] = value
+
+    def __contains__(self, part):
+        return part in self._parts()
+
+    def get(self, part, default=None):
+        return self._parts().get(part, default)
+
+
+class ChipState:
+    """1つのチップが持つ、パートに属さない状態(リズム・ADPCM・FM3拡張モード)。"""
+
+    def __init__(self, ext_mode=False):
+        self.ext_mode = ext_mode
+        self.rhythm_mask = 1
+        self.rhythm_total = 63
+        self.rhythm_inst = [31, 31, 31, 31, 31, 31]
+        self.rhythm_pan = [3, 3, 3, 3, 3, 3]
+        self.pcm_voice, self.pcm_pan, self.pcm_vm, self.pcm_bias = 1, 3, False, 0
+        self.slot_dt = [0, 0, 0, 0]
+        self.kon = [0]
+
+
+class PerChipObj:
+    """属性の読み書きを、現在処理中のチップ用のオブジェクトへ転送する。チップごとに別のオブジェクトを持つ。"""
+
+    def __init__(self, current, factory):
+        object.__setattr__(self, "_current", current)
+        object.__setattr__(self, "_factory", factory)
+        object.__setattr__(self, "_store", {})
+
+    def _obj(self):
+        no = self._current[0]
+        if no not in self._store:
+            self._store[no] = self._factory(no)
+        return self._store[no]
+
+    def __getattr__(self, name):
+        return getattr(self._obj(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._obj(), name, value)
 
 
 def compile_song(song: Song) -> bytes:
@@ -91,54 +152,59 @@ def compile_song(song: Song) -> bytes:
         date=song.date,
         comment=song.comment,
     )
-    # チップ0がYM2608の場合のみ初期化
-    if chip_list and chip_list[0]["name"] == "ym2608":
-        init_fm(vgm)
+    # YM2608 のチップごとに初期化
+    for no, info in enumerate(chip_list):
+        if info["name"] == "ym2608":
+            init_fm(vgm, no)
     pcm_slots, pcm_rom = trim_pcm(song.pcm_slots, song.pcm_rom, used_pcm_numbers(song.events))
     write_rom(vgm, pcm_rom)
-    ay = AyState(ssg_clock(song.chip, song.chip_clock))
     tempo, tempo_mode, timer_b, clock_c = 120, "T", 150, DEFAULT_C
-    voice = {p: 1 for p in FM_PARTS}
-    volume = {p: 15 for p in ALL_PARTS}
-    volume[ADPCM_PART] = 200
-    vol_mode = {p: "v" for p in ALL_PARTS}
-    pan = {p: 3 for p in FM_PARTS}
-    detune = {p: 0 for p in ALL_PARTS}
-    mixer = {p: 1 for p in SSG_PARTS}
-    pms = {p: 0 for p in FM_PARTS}
-    ams = {p: 0 for p in FM_PARTS}
-    amon = {p: [None, None, None, None] for p in FM_PARTS}  # None = 音色の AMON に従う
-    base_tl = {p: [0, 0, 0, 0] for p in FM_PARTS}
-    carrier_idx = {p: set() for p in FM_PARTS}
-    lfo = {p: new_mod_state() for p in MOD_PARTS}
-    trem = {p: new_mod_state() for p in MOD_PARTS}
-    env = {p: new_env() for p in SSG_PARTS}
-    rev = {p: {"on": False, "val": 0, "mode": 1, "tail": False, "vol": 0} for p in ALL_PARTS}
-    held = {p: None for p in ALL_PARTS}
-    last_note = {p: None for p in ALL_PARTS}
-    note_gen = {p: 0 for p in ALL_PARTS}
-    hw_env = {p: False for p in SSG_PARTS}
-    hw_shape = {p: 0 for p in SSG_PARTS}
-    rhythm_mask = 1
-    rhythm_total = 63
-    rhythm_inst = [31, 31, 31, 31, 31, 31]
-    rhythm_pan = [3, 3, 3, 3, 3, 3]
-    pcm_voice, pcm_pan, pcm_vm, pcm_bias = 1, 3, False, 0
-    slot_dt, last_tick = [0, 0, 0, 0], 0
-    ext_mode = song.chip == "ym2608" and any(ev.kind == "slot_dt" or (ev.kind == "ex" and ev.value != 0xF) for ev in song.events)
-    ex_ops = {p: 0xF for p in FM3_PARTS}
-    key_ops = {p: 0xF for p in FM3_PARTS}
-    kon = [0]
+    cur_chip = [0]  # 現在処理中のチップ番号。パートの状態はチップごとに別(テンポだけ共有)
+    chip = 0
+
+    def set_chip(no):
+        nonlocal chip
+        chip = no
+        cur_chip[0] = no
+        vgm.current_chip = no
+
+    ext_chips = {getattr(e, "chip", 0) for e in song.events if e.kind == "slot_dt" or (e.kind == "ex" and e.value != 0xF)}
+    ay = PerChipObj(cur_chip, lambda no: AyState(ssg_clock(*((chip_list[no]["name"], chip_list[no]["clock"]) if no < len(chip_list) else (chip_list[0]["name"], chip_list[0]["clock"])))))
+    cs = PerChipObj(cur_chip, lambda no: ChipState(no < len(chip_list) and chip_list[no]["name"] == "ym2608" and no in ext_chips))
+    voice = PerChip(cur_chip, lambda p: 1, FM_PARTS)
+    volume = PerChip(cur_chip, lambda p: 200 if p == ADPCM_PART else 15, ALL_PARTS)
+    vol_mode = PerChip(cur_chip, lambda p: "v", ALL_PARTS)
+    pan = PerChip(cur_chip, lambda p: 3, FM_PARTS)
+    detune = PerChip(cur_chip, lambda p: 0, ALL_PARTS)
+    mixer = PerChip(cur_chip, lambda p: 1, SSG_PARTS)
+    pms = PerChip(cur_chip, lambda p: 0, FM_PARTS)
+    ams = PerChip(cur_chip, lambda p: 0, FM_PARTS)
+    amon = PerChip(cur_chip, lambda p: [None, None, None, None], FM_PARTS)  # None = 音色の AMON に従う
+    base_tl = PerChip(cur_chip, lambda p: [0, 0, 0, 0], FM_PARTS)
+    carrier_idx = PerChip(cur_chip, lambda p: set(), FM_PARTS)
+    opm_lfo = {}  # YM2151 のハードLFO(チップ全体の設定。キーはチップ番号)
+    lfo = PerChip(cur_chip, lambda p: new_mod_state(), MOD_PARTS)
+    trem = PerChip(cur_chip, lambda p: new_mod_state(), MOD_PARTS)
+    env = PerChip(cur_chip, lambda p: new_env(), SSG_PARTS)
+    rev = PerChip(cur_chip, lambda p: {"on": False, "val": 0, "mode": 1, "tail": False, "vol": 0}, ALL_PARTS)
+    held = PerChip(cur_chip, lambda p: None, ALL_PARTS)
+    last_note = PerChip(cur_chip, lambda p: None, ALL_PARTS)
+    note_gen = PerChip(cur_chip, lambda p: 0, ALL_PARTS)
+    hw_env = PerChip(cur_chip, lambda p: False, SSG_PARTS)
+    hw_shape = PerChip(cur_chip, lambda p: 0, SSG_PARTS)
+    last_tick = 0
+    ex_ops = PerChip(cur_chip, lambda p: 0xF, FM3_PARTS)
+    key_ops = PerChip(cur_chip, lambda p: 0xF, FM3_PARTS)
 
     def fm3_args(part):
         if part in FM3_PARTS:
-            return ext_mode, slot_dt if part == "C" else [0, 0, 0, 0], key_ops[part]
+            return cs.ext_mode, cs.slot_dt if part == "C" else [0, 0, 0, 0], key_ops[part]
         return False, None, 0xF
 
     def write_rhythm_levels():
-        vgm.write_ym2608(0, 0, 0x11, clamp(rhythm_total, 0, 63))
+        vgm.write_ym2608(chip, 0, 0x11, clamp(cs.rhythm_total, 0, 63))
         for i, reg in enumerate(RHYTHM_REG):
-            vgm.write_ym2608(0, 0, reg, RHYTHM_PAN[rhythm_pan[i]] | clamp(rhythm_inst[i], 0, 31))
+            vgm.write_ym2608(chip, 0, reg, RHYTHM_PAN[cs.rhythm_pan[i]] | clamp(cs.rhythm_inst[i], 0, 31))
 
     def ssg_out_vol(part):
         if rev[part]["tail"]:
@@ -179,13 +245,21 @@ def compile_song(song: Song) -> bytes:
             return
         chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
         if chip_name == "ym2151":
-            apply_voice_opm(vgm, chip, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan.get(vp, 3), vol_mode[part], base_tl[part], carrier_idx[part])
+            apply_voice_opm(vgm, chip, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan.get(vp, 3), vol_mode[part], base_tl[part], carrier_idx[part], amon_override=amon[vp])
             return
         apply_voice(vgm, chip, part, voice[vp], volume[part] if vol_override is None else vol_override, song.voices, pan[vp], vol_mode[part], pms[vp], ams[vp], amon[vp], base_tl[part], carrier_idx[part], (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF)
         off = trem[part]["offset"] if trem[part]["on"] else 0
         for index, slot in enumerate(SLOT_MAP[part]):
             if index in carrier_idx[part]:
                 vgm.write_ym2608(chip, PORT[part], 0x40 + slot, clamp(base_tl[part][index] + off, 0, 127))
+
+    def write_opm_lfo(chip_no):
+        st = opm_lfo[chip_no]
+        pmd, amd = (st["pmd"], st["amd"]) if st["on"] else (0, 0)
+        write_opm(vgm, chip_no, 0x1B, st["w"] & 3)  # 上位2bit(CT1/CT2)は 0
+        write_opm(vgm, chip_no, 0x18, st["f"] & 0xFF)
+        write_opm(vgm, chip_no, 0x19, 0x80 | (pmd & 0x7F))  # bit7=1: PMD
+        write_opm(vgm, chip_no, 0x19, amd & 0x7F)  # bit7=0: AMD
 
     def samples_per_clock():
         return max(1, ticks_to_samples(max(1, INTERNAL_WHOLE // max(1, clock_c)), song.tick_rate, tempo, tempo_mode, timer_b, clock_c))
@@ -219,11 +293,23 @@ def compile_song(song: Song) -> bytes:
     ssg_port = 0 if song.chip == "ym2608" else 2
 
     def unlock(port, reg, seq, chip_no=None):
-        if lock_seq.get((port, reg), -1) < seq:
-            vgm.clear_lock(chip if chip_no is None else chip_no, port, reg)
-            lock_seq.pop((port, reg), None)
+        key = (chip if chip_no is None else chip_no, port, reg)
+        if lock_seq.get(key, -1) < seq:
+            vgm.clear_lock(*key)
+            lock_seq.pop(key, None)
+
+    def is_opm():
+        return chip < len(chip_list) and chip_list[chip]["name"] == "ym2151"
 
     def unlock_voice(part, seq):
+        if is_opm():
+            if part in OPM_CH:
+                ch = OPM_CH[part]
+                unlock(0, 0x20 + ch, seq)
+                for slot in OPM_SLOT:
+                    for base in (0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0):
+                        unlock(0, base + ch + slot, seq)
+            return
         port = PORT[part]
         for slot in SLOT_MAP[part]:
             for base in (0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90):
@@ -234,6 +320,11 @@ def compile_song(song: Song) -> bytes:
         vp = "C" if part in FM3_PARTS else part
         if voice[vp] not in song.voices or (part in FM3_PARTS and part != "C" and ex_ops[part] == 0xF):
             return
+        if is_opm():
+            if part in OPM_CH:
+                for index in CARRIERS.get(clamp(song.voices[voice[vp]][0], 0, 7), (3,)):
+                    unlock(0, 0x60 + OPM_CH[part] + OPM_SLOT[index], seq)
+            return
         ops = (key_ops[part] if held[part] is not None else ex_ops[part]) if part in FM3_PARTS else 0xF
         for index in CARRIERS.get(clamp(song.voices[voice[vp]][0], 0, 7), (3,)):
             if (ops >> index) & 1:
@@ -241,7 +332,7 @@ def compile_song(song: Song) -> bytes:
 
     def unlock_ssg(regs, seq):
         for reg in regs:
-            unlock(ssg_port, reg, seq, 0)
+            unlock(ssg_port, reg, seq)
 
     def rewrite_pitch(part):
         note = held[part] if held[part] is not None else last_note[part]
@@ -253,7 +344,7 @@ def compile_song(song: Song) -> bytes:
             flush_ssg(vgm, ay)
         elif chip_name == "ym2151":
             key_on_opm(vgm, chip, part, note, detune[part] + lfo[part]["offset"], True)
-        elif ext_mode and part in FM3_PARTS:
+        elif cs.ext_mode and part in FM3_PARTS:
             _, sdt, ops = fm3_args(part)
             write_ch3_slots(vgm, chip, note, detune[part] + lfo[part]["offset"], sdt, ops)
         elif part in FM_PARTS:
@@ -262,36 +353,45 @@ def compile_song(song: Song) -> bytes:
     def write_wait_mod(samples):
         left = samples
         while left > 0:
-            active = [p for p in MOD_PARTS if lfo[p]["on"] and lfo[p]["depth"] and lfo[p]["count"]]
-            active_trem = [p for p in MOD_PARTS if trem[p]["on"] and trem[p]["depth"] and trem[p]["count"]]
-            active_env = [p for p in SSG_PARTS if env[p]["on"] and env[p]["phase"] != "off" and not hw_env[p]]
+            saved = chip
+            active, active_trem, active_env = [], [], []
+            for c in range(len(chip_list)):
+                set_chip(c)
+                active += [(c, p) for p in MOD_PARTS if lfo[p]["on"] and lfo[p]["depth"] and lfo[p]["count"]]
+                active_trem += [(c, p) for p in MOD_PARTS if trem[p]["on"] and trem[p]["depth"] and trem[p]["count"]]
+                active_env += [(c, p) for p in SSG_PARTS if env[p]["on"] and env[p]["phase"] != "off" and not hw_env[p]]
+            set_chip(saved)
             if not active and not active_trem and not active_env:
                 vgm.write_wait(left)
                 return
             n = min(left, samples_per_clock())
             vgm.write_wait(n)
             left -= n
-            for p in active:
+            for c, p in active:
+                set_chip(c)
                 if step_mod(lfo[p]):
                     rewrite_pitch(p)
-            for p in active_trem:
+            for c, p in active_trem:
+                set_chip(c)
                 if step_mod(trem[p]):
                     if p in SSG_PARTS:
                         ssg_out_vol(p)
                         flush_ssg(vgm, ay)
                     elif p in FM_PARTS:
                         refresh_voice(p)
-            for p in active_env:
+            for c, p in active_env:
+                set_chip(c)
                 if step_env(env[p]):
                     ssg_out_vol(p)
                     flush_ssg(vgm, ay)
+            set_chip(saved)
 
     def pcm_volume():
-        if pcm_vm and pcm_voice in song.pcm_slots:
-            return clamp(song.pcm_slots[pcm_voice][2] + pcm_bias, 0, 255)
+        if cs.pcm_vm and cs.pcm_voice in song.pcm_slots:
+            return clamp(song.pcm_slots[cs.pcm_voice][2] + cs.pcm_bias, 0, 255)
         return volume[ADPCM_PART]
 
-    order = {"loop": 0, "tempo_bpm": 0, "tempo_tb": 0, "clock": 0, "ssg_preset": 1, "lfo": 1, "trem": 1, "ssg_env": 1, "hw_env": 1, "hw_period": 1, "reverb": 1, "slot_dt": 1, "ex": 1, "lfo22": 1, "lfo_ch": 1, "lfo_amon": 1, "reg": 1, "voice": 1, "pcm": 1, "pcm_vm": 1, "pcm_pan": 1, "mixer": 1, "noise": 1, "rhythm_mask": 1, "rhythm_vol": 1, "rhythm_pan": 1, "volume": 2, "volume_fine": 2, "pan": 2, "detune": 2, "rev_tail": 3, "note_off": 3, "rest": 5, "note_on": 4, "porta_on": 4, "porta_step": 6}
+    order = {"loop": 0, "tempo_bpm": 0, "tempo_tb": 0, "clock": 0, "ssg_preset": 1, "lfo": 1, "trem": 1, "ssg_env": 1, "hw_env": 1, "hw_period": 1, "reverb": 1, "slot_dt": 1, "ex": 1, "lfo22": 1, "lfo_opm": 1, "lfo_opm_on": 1, "lfo_ch": 1, "lfo_amon": 1, "reg": 1, "voice": 1, "pcm": 1, "pcm_vm": 1, "pcm_pan": 1, "mixer": 1, "noise": 1, "rhythm_mask": 1, "rhythm_vol": 1, "rhythm_pan": 1, "volume": 2, "volume_fine": 2, "pan": 2, "detune": 2, "rev_tail": 3, "note_off": 3, "rest": 5, "note_on": 4, "porta_on": 4, "porta_step": 6}
 
     def expand_porta(events):
         out = []
@@ -306,18 +406,21 @@ def compile_song(song: Song) -> bytes:
                 out.append(MusicEvent("porta_step", at, note=ev.note, value=ev.value, part=ev.part, duration=i, aux=clocks))
         return out
 
-    if song.chip == "ym2608" or (chip_list and chip_list[0]["name"] == "ym2608"):
-        vgm.write_ym2608(0, 0, 0x10, 0x80)
-        write_rhythm_levels()
-        if ext_mode:
-            vgm.write_ym2608(0, 0, 0x27, 0x40)
+    for no, info in enumerate(chip_list):
+        if info["name"] == "ym2608":
+            set_chip(no)
+            vgm.write_ym2608(no, 0, 0x10, 0x80)
+            write_rhythm_levels()
+            if cs.ext_mode:
+                vgm.write_ym2608(no, 0, 0x27, 0x40)
+    set_chip(0)
 
     def ev_key(e):
         rank = 2 if e.kind == "porta_step" and e.duration >= e.aux else order.get(e.kind, 9)
         return (e.tick, rank, e.part)
 
     for ev in sorted(expand_porta(song.events), key=ev_key):
-        chip = getattr(ev, "chip", 0)
+        set_chip(getattr(ev, "chip", 0))
         chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
         if chip_name == "ym2151":
             pass
@@ -340,11 +443,11 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "pcm":
             if song.pcm_slots and ev.value not in song.pcm_slots:
                 raise MMLError("pcm.undefined", no=ev.value)
-            pcm_voice = ev.value
+            cs.pcm_voice = ev.value
         elif ev.kind == "pcm_vm":
-            pcm_vm, pcm_bias = True, ev.value
+            cs.pcm_vm, cs.pcm_bias = True, ev.value
         elif ev.kind == "pcm_pan":
-            pcm_pan = ev.value
+            cs.pcm_pan = ev.value
         elif ev.kind == "hw_env":
             hw_env[ev.part], hw_shape[ev.part] = True, ev.value
             unlock_ssg((8 + SSG_CH[ev.part],), cur_seq)
@@ -355,17 +458,17 @@ def compile_song(song: Song) -> bytes:
             vgm.write_ssg(11, ev.value & 0xFF)
             vgm.write_ssg(12, (ev.value >> 8) & 0xFF)
         elif ev.kind == "rhythm_mask":
-            rhythm_mask = ev.value & 0x3F
+            cs.rhythm_mask = ev.value & 0x3F
         elif ev.kind == "rhythm_vol":
             if ev.params:
-                rhythm_total = clamp(ev.params[0], 0, 63)
+                cs.rhythm_total = clamp(ev.params[0], 0, 63)
             for i, val in enumerate(ev.params[1:7]):
-                rhythm_inst[i] = clamp(val, 0, 31)
+                cs.rhythm_inst[i] = clamp(val, 0, 31)
             write_rhythm_levels()
         elif ev.kind == "rhythm_pan":
             inst, pan_bits = ev.value & 0x0F, (ev.value >> 4) & 3
             if inst < 6:
-                rhythm_pan[inst] = pan_bits
+                cs.rhythm_pan[inst] = pan_bits
                 write_rhythm_levels()
         elif ev.kind == "lfo" and ev.part in MOD_PARTS:
             lfo[ev.part].update(on=bool(ev.legato), delay=ev.note, step=max(1, ev.duration), depth=ev.value, count=max(0, ev.aux))
@@ -385,7 +488,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "reverb":
             rev[ev.part].update(on=bool(ev.legato), val=ev.value, mode=ev.note)
         elif ev.kind == "slot_dt":
-            slot_dt = [ev.duration, ev.aux, ev.value, ev.note]
+            cs.slot_dt = [ev.duration, ev.aux, ev.value, ev.note]
             rewrite_pitch("C")
         elif ev.kind == "ex":
             ex_ops[ev.part] = ev.value
@@ -393,26 +496,50 @@ def compile_song(song: Song) -> bytes:
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
             if chip_name != "ym2151":
                 vgm.write_ym2608(chip, 0, 0x22, ev.value & 0xFF)
+        elif ev.kind in ("lfo_opm", "lfo_opm_on"):
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name == "ym2151":
+                st = opm_lfo.setdefault(chip, {"w": 0, "f": 0, "pmd": 0, "amd": 0, "on": True})
+                if ev.kind == "lfo_opm_on":
+                    st["on"] = bool(ev.value)
+                else:
+                    for key, val in zip(("w", "f", "pmd", "amd"), ev.params):
+                        if val is not None:
+                            st[key] = val
+                    st["on"] = True
+                write_opm_lfo(chip)
         elif ev.kind == "lfo_ch":
-            unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
+            if not is_opm():
+                unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pms[ev.part], ams[ev.part] = ev.note, ev.value
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
-            if chip_name != "ym2151":
+            if chip_name == "ym2151":
+                if ev.part in OPM_CH:
+                    write_opm(vgm, chip, 0x38 + OPM_CH[ev.part], (clamp(ev.note, 0, 7) << 4) | clamp(ev.value, 0, 3))
+            else:
                 write_b4(vgm, chip, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "lfo_amon":
             avp = "C" if ev.part in FM3_PARTS else ev.part
             amon[avp][ev.note] = ev.value
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
-            if chip_name != "ym2151":
+            if chip_name == "ym2151":
+                if avp in OPM_CH and voice[avp] in song.voices:
+                    raw_ops = song.voices[voice[avp]][3]
+                    if ev.note < len(raw_ops):
+                        write_opm(vgm, chip, 0xA0 + OPM_CH[avp] + OPM_SLOT[ev.note], ((1 if ev.value else 0) << 7) | clamp(raw_ops[ev.note][1], 0, 31))
+            else:
                 dr = song.voices[voice[avp]][2][ev.note][3] & 0x1F if voice[avp] in song.voices else 0
                 vgm.write_ym2608(chip, PORT[ev.part], 0x60 + SLOT_MAP[ev.part][ev.note], ((1 if ev.value else 0) << 7) | dr)
         elif ev.kind == "reg":
-            if ev.part in SSG_PARTS and song.chip != "ym2608":
+            if is_opm():
+                vgm.write_ym2151(chip, ev.note, ev.value, True)
+                lock_seq[(chip, 0, ev.note & 0xFF)] = cur_seq
+            elif ev.part in SSG_PARTS and song.chip != "ym2608":
                 vgm.write_ssg(ev.note & 0x0F, ev.value, True)
-                lock_seq[(2, ev.note & 0x0F)] = cur_seq
+                lock_seq[(chip, 2, ev.note & 0x0F)] = cur_seq
             else:
                 vgm.write_ym2608(chip, ev.duration, ev.note, ev.value, True)
-                lock_seq[(1 if ev.duration else 0, ev.note & 0xFF)] = cur_seq
+                lock_seq[(chip, 1 if ev.duration else 0, ev.note & 0xFF)] = cur_seq
         elif ev.kind == "voice":
             voice[ev.part] = ev.value
             if ev.part in amon:
@@ -430,7 +557,7 @@ def compile_song(song: Song) -> bytes:
             flush_ssg(vgm, ay)
         elif ev.kind == "volume" and ev.part == ADPCM_PART:
             volume[ev.part] = clamp(ev.value, 0, 255)
-            if not pcm_vm:
+            if not cs.pcm_vm:
                 vgm.write_ym2608(chip, 1, 0x0B, volume[ev.part])
         elif ev.kind == "volume":
             vol_mode[ev.part], volume[ev.part] = "v", ev.value
@@ -449,7 +576,10 @@ def compile_song(song: Song) -> bytes:
                 unlock_tl(ev.part, cur_seq)
                 refresh_voice(ev.part)
         elif ev.kind == "pan":
-            unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
+            if not is_opm():
+                unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
+            elif ev.part in OPM_CH:
+                unlock(0, 0x20 + OPM_CH[ev.part], cur_seq)
             pan[ev.part] = ev.value
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
             if chip_name == "ym2151":
@@ -480,22 +610,22 @@ def compile_song(song: Song) -> bytes:
                 flush_ssg(vgm, ay)
         elif ev.kind == "note_on" and ev.part == RHYTHM_PART:
             note_gen[ev.part] = ev.aux
-            held[ev.part] = rhythm_mask
-            vgm.write_ym2608(chip, 0, 0x10, rhythm_mask & 0x3F)
+            held[ev.part] = cs.rhythm_mask
+            vgm.write_ym2608(chip, 0, 0x10, cs.rhythm_mask & 0x3F)
         elif ev.kind == "note_on" and ev.part == ADPCM_PART:
             same = ev.legato and held[ev.part] == ev.note
             note_gen[ev.part] = ev.aux
             if not song.pcm_slots:
                 held[ev.part] = ev.note
                 continue
-            if pcm_voice not in song.pcm_slots:
-                raise MMLError("pcm.undefined", no=pcm_voice)
-            start, end, _base = pcm_slots[pcm_voice]
+            if cs.pcm_voice not in song.pcm_slots:
+                raise MMLError("pcm.undefined", no=cs.pcm_voice)
+            start, end, _base = pcm_slots[cs.pcm_voice]
             held[ev.part] = ev.note
             if same:
                 set_rate(vgm, chip, delta_n(ev.note, detune[ev.part]))
             else:
-                play(vgm, chip, start, end, delta_n(ev.note, detune[ev.part]), pcm_volume(), pcm_pan)
+                play(vgm, chip, start, end, delta_n(ev.note, detune[ev.part]), pcm_volume(), cs.pcm_pan)
         elif ev.kind == "note_on":
             note_gen[ev.part] = ev.aux
             if ev.part in SSG_PARTS:
@@ -542,7 +672,7 @@ def compile_song(song: Song) -> bytes:
                     key_on_opm(vgm, chip, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato)
                 else:
                     eff, sdt, ops = fm3_args(ev.part)
-                    key_on(vgm, chip, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
+                    key_on(vgm, chip, ev.part, ev.note, detune[ev.part] + lfo[ev.part]["offset"], ev.legato, eff, sdt, ops, cs.kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_on" and ev.part in FM_PARTS:
             note_gen[ev.part] = ev.aux
             if ev.part in FM3_PARTS and not ev.legato:
@@ -553,13 +683,13 @@ def compile_song(song: Song) -> bytes:
                 key_on_opm(vgm, chip, ev.part, ev.note, detune[ev.part], ev.legato)
             else:
                 eff, sdt, ops = fm3_args(ev.part)
-                key_on(vgm, chip, ev.part, ev.note, detune[ev.part], ev.legato, eff, sdt, ops, kon if ev.part in FM3_PARTS else None)
+                key_on(vgm, chip, ev.part, ev.note, detune[ev.part], ev.legato, eff, sdt, ops, cs.kon if ev.part in FM3_PARTS else None)
         elif ev.kind == "porta_step" and ev.part in FM_PARTS:
             held[ev.part] = ev.value
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
             if chip_name == "ym2151":
                 key_on_opm(vgm, chip, ev.part, ev.value, detune[ev.part], True)
-            elif ext_mode and ev.part in FM3_PARTS:
+            elif cs.ext_mode and ev.part in FM3_PARTS:
                 _, sdt, ops = fm3_args(ev.part)
                 write_ch3_porta(vgm, chip, ev.note, ev.value, detune[ev.part], sdt, ev.duration, ev.aux, ops)
             else:
@@ -595,7 +725,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "note_off" and ev.part == RHYTHM_PART:
             if ev.aux not in (0, note_gen[ev.part]) and ev.aux != 10**9:
                 continue
-            mask = held[ev.part] or rhythm_mask
+            mask = held[ev.part] or cs.rhythm_mask
             held[ev.part] = None
             vgm.write_ym2608(chip, 0, 0x10, 0x80 | (mask & 0x3F))
         elif ev.kind == "note_off" and ev.part == ADPCM_PART:
@@ -629,7 +759,7 @@ def compile_song(song: Song) -> bytes:
                 if chip_name == "ym2151":
                     key_off_opm(vgm, chip, ev.part)
                 else:
-                    key_off(vgm, chip, ev.part, key_ops[ev.part] if ev.part in FM3_PARTS else 0xF, kon if ev.part in FM3_PARTS else None)
+                    key_off(vgm, chip, ev.part, key_ops[ev.part] if ev.part in FM3_PARTS else 0xF, cs.kon if ev.part in FM3_PARTS else None)
                 if rev[ev.part]["tail"]:
                     refresh_voice(ev.part)
                     rev[ev.part]["tail"] = False

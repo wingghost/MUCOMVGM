@@ -61,6 +61,7 @@ class PartState:
     muted: bool = False
     stopped: bool = False
     chip_name: str = "ym2608"
+    chip_no: int = 0
     pms: int = 0
     ams: int = 0
     amon: list[int] = field(default_factory=lambda: [0, 0, 0, 0])
@@ -115,6 +116,7 @@ class Song:
     jump_tick: int = 0
     lfo_enable: int = 0
     lfo_speed: int = 0
+    chip_lfo: dict = field(default_factory=dict)  # チップ番号 → [LFO有効, LFO速度](YM2608 のハードLFO)
     voice_file: str = ""
     pcm_file: str = ""
     pcm_list: str = ""

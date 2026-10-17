@@ -21,7 +21,11 @@ MESSAGES = {
     "porta.no_note": "No note in portamento",
 
     # --- chip ---
-    "chip.unsupported": "Supported chips are ym2608 / ay8910 / ym2149",
+    "chip.need_args": "Not enough arguments for #chip",
+    "chip.bad_no": "The #chip number is not a number",
+    "chip.need_prefix": "There are two or more chips, but the line has no chip number at its start",
+    "chip.unsupported": "Unsupported chip",
+    "h.need_number": "A number is missing in the H command",
 
     # --- FM voice ---
     "fm.voice_undefined": "FM voice @{no} is not defined",

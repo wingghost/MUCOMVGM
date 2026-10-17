@@ -61,16 +61,16 @@ def pack_voice(fb: int, al: int, ops: list[list[int]]) -> tuple:
     return clamp(al, 0, 7), clamp(fb, 0, 7), slots, tuple(raw_ops)
 
 
-def init_fm(vgm) -> None:
+def init_fm(vgm, chip=0) -> None:
     # マルチチップ対応後は chip 属性を持たない場合がある
     chips = getattr(vgm, "chips", None)
     if chips is None:
         if getattr(vgm, "chip", None) != "ym2608":
             return
-    elif not chips or chips[0].get("name") != "ym2608":
+    elif chip >= len(chips) or chips[chip].get("name") != "ym2608":
         return
     for reg, val in ((0x22, 0), (0x27, 0), (0x28, 0), (0x29, 0x80)):
-        vgm.write_ym2608(0, 0, reg, val)
+        vgm.write_ym2608(chip, 0, reg, val)
 
 
 def write_b4(vgm, chip, part, pan, pms, ams) -> None:

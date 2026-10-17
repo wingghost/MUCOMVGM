@@ -20,7 +20,11 @@ MESSAGES = {
     "porta.no_note": "ポルタメントに音符がありません",
 
     # --- チップ ---
-    "chip.unsupported": "対応チップは ym2608 / ay8910 / ym2149 です",
+    "chip.need_args": "#chipの引数が足りません",
+    "chip.bad_no": "#chipの番号が数字ではありません",
+    "chip.need_prefix": "チップが2つ以上なのに、行頭にチップ番号がありません",
+    "chip.unsupported": "未対応のチップです",
+    "h.need_number": "Hコマンドの数字が省略されています",
 
     # --- FM音色 ---
     "fm.voice_undefined": "FM音色 @{no} が定義されていません",

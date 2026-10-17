@@ -13,6 +13,10 @@ FREQ_HI = frozenset({0xA4, 0xA5, 0xA6, 0xAC, 0xAD, 0xAE})
 NO_DEDUP_REGS = frozenset({(0, 0x10), (0, 0x28), (0, 0x0D), (1, 0x00)})
 
 
+def is_lockable_opm(reg: int) -> bool:
+    return 0x20 <= reg <= 0x27 or 0x40 <= reg <= 0xFF
+
+
 def is_lockable(port: int, reg: int) -> bool:
     return 0x30 <= reg <= 0x9F or 0xB0 <= reg <= 0xB2 or 0xB4 <= reg <= 0xB6 or (port == 0 and reg <= 0x0C)
 
@@ -46,6 +50,7 @@ class VgmWriter:
         self.freq_hi = {}
         self.pending_wait = 0
         self.locks = {}
+        self.current_chip = 0  # SSG の書き込み先(ドライバーが処理中のチップに合わせて切り替える)
         self.gd3 = {}
 
     def set_gd3(self, title: str = "", composer: str = "", album: str = "", date: str = "", comment: str = "") -> None:
@@ -121,8 +126,8 @@ class VgmWriter:
         self.data += bytes((cmd, reg, value))
 
     def write_ssg(self, reg: int, value: int, lock: bool = False) -> None:
-        # SSG is on chip 0 for now
-        self.write_ym2608(0, 0, reg & 0x0F, value & 0xFF, lock)
+        # SSG は、処理中のチップ(current_chip)の YM2608 に書く
+        self.write_ym2608(self.current_chip, 0, reg & 0x0F, value & 0xFF, lock)
 
     def mark_loop(self) -> None:
         if self.loop_offset is None:
@@ -176,7 +181,14 @@ class VgmWriter:
         header[0x04:0x08] = struct.pack("<I", 256 + len(self.data) + len(gd3_bytes) - 4)
         return bytes(header) + bytes(self.data) + gd3_bytes
 
-    def write_ym2151(self, chip: int, reg: int, value: int) -> None:
+    def write_ym2151(self, chip: int, reg: int, value: int, lock: bool = False) -> None:
+        reg, value = reg & 0xFF, value & 0xFF
+        key = (chip, 0, reg)
+        if is_lockable_opm(reg):
+            if lock:
+                self.locks[key] = value
+            elif key in self.locks:
+                value = self.locks[key]
         self.flush_wait()
         # YM2151が何番目のチップでも、YM2151としては1つ目なので 0x54 を使う
-        self.data += bytes((0x54, reg & 0xFF, value & 0xFF))
+        self.data += bytes((0x54, reg, value))

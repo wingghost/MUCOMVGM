@@ -129,7 +129,7 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
                 raise MMLError("chip.bad_no")
             name = parts[2].lower()
             if name not in ("ym2608", "ym2151"):
-                raise MMLError("chip.unsupported", name=name)
+                raise MMLError("chip.unsupported")
             clock = int(parts[3]) if len(parts) > 3 else (YM2608_CLOCK if name == "ym2608" else 3579545)
             if not hasattr(song, "chips"):
                 song.chips = []
@@ -187,6 +187,8 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
         if body.count("[") > body.count("]"):
             raise MMLError("loop.unclosed", part=part)
         state = PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15)
+        state.chip_no = chip_no
+        state.chip_name = next((c.name for c in getattr(song, "chips", []) if c.no == chip_no), song.chip)
         states[(chip_no, part)] = state
         first_event = len(song.events)
         parse_part_mml(song, part, body, state, line_map)

@@ -4,6 +4,8 @@ from chips.opn import CARRIERS, clamp, signed_dt_to_opn
 
 # YM2151 channel mapping: A=0 ... H=7
 OPM_CH = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6, "H": 7}
+# y コマンドのタグ → YM2151 のオペレーターレジスタ(YM2608 のタグと役割が近いものを割り当てる)
+OPM_Y_SLOT_REGS = {"DM": 0x40, "TL": 0x60, "KA": 0x80, "DR": 0xA0, "SR": 0xC0, "SL": 0xE0}
 OPM_SLOT = (0, 16, 8, 24)  # base + channel for each operator
 OPM_NOTE_CODE = (14, 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13)  # C, C#, D, ... B → KCのノートコード(Cは1つ下のオクターブ側)
 
