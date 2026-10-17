@@ -58,7 +58,7 @@ def main() -> int:
             print(f"{key}:{clocks} ", end="")
         print()
     else:
-        print("".join(f"{part}:{song.part_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
+        print("".join(f"{part}:{song.part_clocks.get('0:' + part, 0)} " for part in sorted(ALL_PARTS)))
     if song.loop_tick is not None:
         print("[ Loop count  ]")
         if song.chips and len(song.chips) > 1:
@@ -66,7 +66,7 @@ def main() -> int:
                 print(f"{key}:{clocks} ", end="")
             print()
         else:
-            print("".join(f"{part}:{song.part_loop_clocks.get(part, 0)} " for part in sorted(ALL_PARTS)))
+            print("".join(f"{part}:{song.part_loop_clocks.get('0:' + part, 0)} " for part in sorted(ALL_PARTS)))
     return 0
 
 

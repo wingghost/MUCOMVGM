@@ -107,7 +107,7 @@ def compile_song(song: Song) -> bytes:
     mixer = {p: 1 for p in SSG_PARTS}
     pms = {p: 0 for p in FM_PARTS}
     ams = {p: 0 for p in FM_PARTS}
-    amon = {p: [0, 0, 0, 0] for p in FM_PARTS}
+    amon = {p: [None, None, None, None] for p in FM_PARTS}  # None = 音色の AMON に従う
     base_tl = {p: [0, 0, 0, 0] for p in FM_PARTS}
     carrier_idx = {p: set() for p in FM_PARTS}
     lfo = {p: new_mod_state() for p in MOD_PARTS}
@@ -218,9 +218,9 @@ def compile_song(song: Song) -> bytes:
     lock_seq = {}
     ssg_port = 0 if song.chip == "ym2608" else 2
 
-    def unlock(port, reg, seq):
+    def unlock(port, reg, seq, chip_no=None):
         if lock_seq.get((port, reg), -1) < seq:
-            vgm.clear_lock(port, reg)
+            vgm.clear_lock(chip if chip_no is None else chip_no, port, reg)
             lock_seq.pop((port, reg), None)
 
     def unlock_voice(part, seq):
@@ -241,7 +241,7 @@ def compile_song(song: Song) -> bytes:
 
     def unlock_ssg(regs, seq):
         for reg in regs:
-            unlock(ssg_port, reg, seq)
+            unlock(ssg_port, reg, seq, 0)
 
     def rewrite_pitch(part):
         note = held[part] if held[part] is not None else last_note[part]
@@ -390,7 +390,9 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "ex":
             ex_ops[ev.part] = ev.value
         elif ev.kind == "lfo22":
-            vgm.write_ym2608(chip, 0, 0x22, ev.value & 0xFF)
+            chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
+            if chip_name != "ym2151":
+                vgm.write_ym2608(chip, 0, 0x22, ev.value & 0xFF)
         elif ev.kind == "lfo_ch":
             unlock(PORT[ev.part], 0xB4 + REG_CH[ev.part], cur_seq)
             pms[ev.part], ams[ev.part] = ev.note, ev.value
@@ -398,10 +400,11 @@ def compile_song(song: Song) -> bytes:
             if chip_name != "ym2151":
                 write_b4(vgm, chip, ev.part, pan[ev.part], pms[ev.part], ams[ev.part])
         elif ev.kind == "lfo_amon":
-            amon[ev.part][ev.note] = ev.value
+            avp = "C" if ev.part in FM3_PARTS else ev.part
+            amon[avp][ev.note] = ev.value
             chip_name = chip_list[chip]["name"] if chip < len(chip_list) else "ym2608"
             if chip_name != "ym2151":
-                dr = song.voices[voice[ev.part]][2][ev.note][3] & 0x1F if voice[ev.part] in song.voices else 0
+                dr = song.voices[voice[avp]][2][ev.note][3] & 0x1F if voice[avp] in song.voices else 0
                 vgm.write_ym2608(chip, PORT[ev.part], 0x60 + SLOT_MAP[ev.part][ev.note], ((1 if ev.value else 0) << 7) | dr)
         elif ev.kind == "reg":
             if ev.part in SSG_PARTS and song.chip != "ym2608":
@@ -412,6 +415,8 @@ def compile_song(song: Song) -> bytes:
                 lock_seq[(1 if ev.duration else 0, ev.note & 0xFF)] = cur_seq
         elif ev.kind == "voice":
             voice[ev.part] = ev.value
+            if ev.part in amon:
+                amon[ev.part] = [None, None, None, None]
             unlock_voice(ev.part, cur_seq)
             refresh_voice(ev.part)
         elif ev.kind == "mixer":
@@ -455,7 +460,7 @@ def compile_song(song: Song) -> bytes:
         elif ev.kind == "detune" and ev.part == ADPCM_PART:
             detune[ev.part] = ev.value
             if held[ev.part] is not None:
-                set_rate(vgm, delta_n(held[ev.part], ev.value))
+                set_rate(vgm, chip, delta_n(held[ev.part], ev.value))
         elif ev.kind == "detune":
             detune[ev.part] = ev.value
             rewrite_pitch(ev.part)
@@ -488,9 +493,9 @@ def compile_song(song: Song) -> bytes:
             start, end, _base = pcm_slots[pcm_voice]
             held[ev.part] = ev.note
             if same:
-                set_rate(vgm, delta_n(ev.note, detune[ev.part]))
+                set_rate(vgm, chip, delta_n(ev.note, detune[ev.part]))
             else:
-                play(vgm, start, end, delta_n(ev.note, detune[ev.part]), pcm_volume(), pcm_pan)
+                play(vgm, chip, start, end, delta_n(ev.note, detune[ev.part]), pcm_volume(), pcm_pan)
         elif ev.kind == "note_on":
             note_gen[ev.part] = ev.aux
             if ev.part in SSG_PARTS:
@@ -597,7 +602,7 @@ def compile_song(song: Song) -> bytes:
             if ev.aux not in (0, note_gen[ev.part]) and ev.aux != 10**9:
                 continue
             held[ev.part] = None
-            stop(vgm)
+            stop(vgm, chip)
         elif ev.kind == "note_off":
             if ev.aux not in (0, note_gen[ev.part]) and ev.aux != 10**9:
                 continue
@@ -630,7 +635,7 @@ def compile_song(song: Song) -> bytes:
                     rev[ev.part]["tail"] = False
         elif ev.kind == "rest" and ev.part == ADPCM_PART:
             held[ev.part] = None
-            stop(vgm)
+            stop(vgm, chip)
         elif ev.kind == "rest" and ev.part in ALL_PARTS:
             if ev.part in SSG_PARTS and env[ev.part]["on"] and env[ev.part]["phase"] == "release":
                 held[ev.part] = None

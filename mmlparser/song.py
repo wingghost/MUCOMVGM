@@ -188,8 +188,9 @@ def parse_mml(text: str, folder: Path | None = None) -> Song:
             raise MMLError("loop.unclosed", part=part)
         state = PartState(octave=1 if part == ADPCM_PART else 6, volume_v=200 if part == ADPCM_PART else 15)
         states[(chip_no, part)] = state
+        first_event = len(song.events)
         parse_part_mml(song, part, body, state, line_map)
-        for ev in song.events[-20:]:  # 直近のイベントにチップ番号をセット
+        for ev in song.events[first_event:]:  # このパートで増えたイベントすべてにチップ番号をセット
             if ev.part == part:
                 ev.chip = chip_no
     if song.loop_candidates:

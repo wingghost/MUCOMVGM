@@ -11,7 +11,7 @@ def write_opm(vgm, chip: int, reg: int, value: int) -> None:
     vgm.write_ym2151(chip, reg, value)
 
 
-def apply_voice_opm(vgm, chip: int, part: str, voice_id: int, volume: int, voices, pan: int, vol_mode: str, base_tl, carrier_idx, ops=0xF) -> None:
+def apply_voice_opm(vgm, chip: int, part: str, voice_id: int, volume: int, voices, pan: int, vol_mode: str, base_tl, carrier_idx, ops=0xF, amon_override=None) -> None:
     if part not in OPM_CH or voice_id not in voices:
         return
     ch = OPM_CH[part]
@@ -31,6 +31,8 @@ def apply_voice_opm(vgm, chip: int, part: str, voice_id: int, volume: int, voice
         if index >= len(raw_ops):
             break
         ar, dr, sr, rr, sl, tl, ks, ml, dt, dt2, amon = raw_ops[index]
+        if amon_override is not None and index < len(amon_override) and amon_override[index] is not None:
+            amon = amon_override[index]  # HM で指定された値を優先(None なら音色のAMONに従う)
         slot = ch + base
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl

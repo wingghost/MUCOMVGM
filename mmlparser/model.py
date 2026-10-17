@@ -60,6 +60,7 @@ class PartState:
     detune: int = 0
     muted: bool = False
     stopped: bool = False
+    chip_name: str = "ym2608"
     pms: int = 0
     ams: int = 0
     amon: list[int] = field(default_factory=lambda: [0, 0, 0, 0])

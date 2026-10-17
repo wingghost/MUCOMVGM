@@ -187,26 +187,26 @@ def write_rom(vgm, rom: bytes) -> None:
     vgm.data += bytes((0x67, 0x66, 0x81)) + struct.pack("<I", len(payload)) + payload
 
 
-def play(vgm, start: int, end: int, rate: int, volume: int, pan: int) -> None:
+def play(vgm, chip: int, start: int, end: int, rate: int, volume: int, pan: int) -> None:
     pan_bits = (0x00, 0x40, 0x80, 0xC0)[pan & 3]
-    vgm.write_ym2608(1, 0x00, 0x01)
-    vgm.write_ym2608(1, 0x01, pan_bits)
-    vgm.write_ym2608(1, 0x02, start & 0xFF)
-    vgm.write_ym2608(1, 0x03, (start >> 8) & 0xFF)
-    vgm.write_ym2608(1, 0x04, end & 0xFF)
-    vgm.write_ym2608(1, 0x05, (end >> 8) & 0xFF)
-    vgm.write_ym2608(1, 0x0C, end & 0xFF)
-    vgm.write_ym2608(1, 0x0D, (end >> 8) & 0xFF)
-    vgm.write_ym2608(1, 0x09, rate & 0xFF)
-    vgm.write_ym2608(1, 0x0A, (rate >> 8) & 0xFF)
-    vgm.write_ym2608(1, 0x0B, volume & 0xFF)
-    vgm.write_ym2608(1, 0x00, 0xA0)
+    vgm.write_ym2608(chip, 1, 0x00, 0x01)
+    vgm.write_ym2608(chip, 1, 0x01, pan_bits)
+    vgm.write_ym2608(chip, 1, 0x02, start & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x03, (start >> 8) & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x04, end & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x05, (end >> 8) & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x0C, end & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x0D, (end >> 8) & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x09, rate & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x0A, (rate >> 8) & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x0B, volume & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x00, 0xA0)
 
 
-def set_rate(vgm, rate: int) -> None:
-    vgm.write_ym2608(1, 0x09, rate & 0xFF)
-    vgm.write_ym2608(1, 0x0A, (rate >> 8) & 0xFF)
+def set_rate(vgm, chip: int, rate: int) -> None:
+    vgm.write_ym2608(chip, 1, 0x09, rate & 0xFF)
+    vgm.write_ym2608(chip, 1, 0x0A, (rate >> 8) & 0xFF)
 
 
-def stop(vgm) -> None:
-    vgm.write_ym2608(1, 0x00, 0x01)
+def stop(vgm, chip: int) -> None:
+    vgm.write_ym2608(chip, 1, 0x00, 0x01)

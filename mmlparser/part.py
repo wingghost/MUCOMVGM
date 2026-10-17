@@ -49,6 +49,7 @@ def parse_part_mml(song, part, mml, state, line_map=None):
     mml = expand_macros(strip_comment(mml), song.macros)
     mml = "".join(ch for ch in mml if not ch.isspace())
     lo = 0 if part == ADPCM_PART else 1
+    opm = state.chip_name == "ym2151"
     tick, octave = state.tick, state.octave
     def_len, def_clocks = state.def_len, state.def_clocks
     q, q_mode, q_div = state.q, state.q_mode, state.q_div
@@ -431,7 +432,16 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                     _, i = read_imm(mml, k + 1, end, 0)
             elif c == "H" and part in FM_PARTS:
                 nxt = mml[i + 1] if i + 1 < end else ""
-                if nxt in "Ff":
+                if opm and nxt and nxt in "Ff":
+                    # YM2151: HF0 で PMD/AMD を 0 にして LFO を止める。HF1 で直前の Hn1,n2,n3,n4 の値に戻す
+                    n, k = read_imm(mml, i + 2, end, None)
+                    i = i + 1 if n is None else k
+                    song.events.append(MusicEvent("lfo_opm_on", tick, value=0 if n == 0 else 1, part=part))
+                elif opm and nxt and nxt in "Ww":
+                    # YM2151 では HW は使わない(数値だけ読み飛ばす)
+                    n, k = read_imm(mml, i + 2, end, None)
+                    i = i + 1 if n is None else k
+                elif nxt in "Ff":
                     n, i = read_imm(mml, i + 2, end, 1)
                     song.lfo_enable = 1 if n else 0
                     song.events.append(MusicEvent("lfo22", tick, value=lfo22_value(song.lfo_enable, song.lfo_speed), part=part))
@@ -453,6 +463,19 @@ def parse_part_mml(song, part, mml, state, line_map=None):
                     slot_i = clamp(slot, 1, 4) - 1
                     amon[slot_i] = 1 if on else 0
                     song.events.append(MusicEvent("lfo_amon", tick, note=slot_i, value=amon[slot_i], part=part))
+                elif opm:
+                    # YM2151: Hn1,n2,n3,n4 = 波形(0-3), LFO速度(0-255), PMD(0-127), AMD(0-127)。後ろの数値は省略可(省略した分は前の値を保つ)
+                    vals, k = [], i
+                    for _ in range(4):
+                        v, k2 = read_imm(mml, k + 1, end, None)
+                        if v is None:
+                            break
+                        vals.append(v)
+                        k = k2
+                    i = k
+                    vals += [None] * (4 - len(vals))
+                    params = tuple(None if v is None else clamp(v, 0, top) for v, top in zip(vals, (3, 255, 127, 127)))
+                    song.events.append(MusicEvent("lfo_opm", tick, params=params, part=part))
                 else:
                     speed, k = read_imm(mml, i + 1, end, 0)
                     pm, k = read_imm(mml, k + 1, end, 0)

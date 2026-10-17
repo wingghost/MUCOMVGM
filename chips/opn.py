@@ -93,7 +93,7 @@ def apply_voice(vgm, chip, part, voice_id, volume, voices, pan, vol_mode, pms, a
         dtml, tl, ar, dr, sr, slrr = slots[index]
         out_tl = clamp(tl + tl_add, 0, 127) if index in carriers else clamp(tl, 0, 127)
         base_tl[index] = out_tl
-        amon_bit = voice_amon[index] if index < len(voice_amon) else 0
+        amon_bit = amon[index] if index < len(amon) and amon[index] is not None else (voice_amon[index][10] if index < len(voice_amon) else 0)
         # print(f"voice_amon[{index}] = {amon_bit}")
         vgm.write_ym2608(chip, port, 0x30 + slot, dtml & 0x7F)
         vgm.write_ym2608(chip, port, 0x40 + slot, out_tl)

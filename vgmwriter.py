@@ -61,8 +61,8 @@ class VgmWriter:
         s = s.replace("\r\n", "\n").replace("\r", "\n")
         return s.encode("utf-16-le") + b"\x00\x00"
 
-    def clear_lock(self, port: int, reg: int) -> None:
-        self.locks.pop((port, reg), None)
+    def clear_lock(self, chip: int, port: int, reg: int) -> None:
+        self.locks.pop((chip, port, reg), None)
 
     def write_wait(self, samples: int) -> None:
         left = max(0, int(samples))
