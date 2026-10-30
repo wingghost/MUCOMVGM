@@ -27,16 +27,18 @@ def read_mml_text(path: Path) -> str:
 
 def check_ex_overlap(states: dict) -> None:
     # C/L/M/N の音符(休符を除く)が、時間的に重なり、かつ同じオペレータを担当していたらエラーにする
-    spans = sorted((s, e, m, p) for p in FM3_PARTS if p in states for s, e, m in states[p].spans)
-    active = []
-    for s, e, m, p in spans:
-        active = [a for a in active if a[1] > s]
-        for s2, e2, m2, p2 in active:
-            if p2 != p and m & m2:
-                names = sorted((p, p2))
-                ops = ",".join(str(i + 1) for i in range(4) if (m & m2) >> i & 1)
-                raise MMLError("ex.overlap", a=names[0], b=names[1], ops=ops, tick=s)
-        active.append((s, e, m, p))
+    # states のキーは (チップ番号, パート) なので、チップごとに調べる (以前は p in states が常に偽で、何も検査されなかった)
+    for chip_no in sorted({key[0] for key in states}):
+        spans = sorted((s, e, m, p) for p in FM3_PARTS if (chip_no, p) in states for s, e, m in states[(chip_no, p)].spans)
+        active = []
+        for s, e, m, p in spans:
+            active = [a for a in active if a[1] > s]
+            for s2, e2, m2, p2 in active:
+                if p2 != p and m & m2:
+                    names = sorted((p, p2))
+                    ops = ",".join(str(i + 1) for i in range(4) if (m & m2) >> i & 1)
+                    raise MMLError("ex.overlap", a=names[0], b=names[1], ops=ops, tick=s)
+            active.append((s, e, m, p))
 
 
 def apply_jump(song: Song) -> None:
