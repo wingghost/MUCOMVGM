@@ -400,10 +400,10 @@ def compile_song(song: Song) -> bytes:
                 out.append(ev)
                 continue
             clocks = ev.params[0] if ev.params else max(1, ev.duration * clock_c // INTERNAL_WHOLE)
-            out.append(MusicEvent("porta_on", ev.tick, note=ev.note, value=ev.value, part=ev.part, legato=ev.legato, aux=ev.aux, duration=clocks))
+            out.append(MusicEvent("porta_on", ev.tick, note=ev.note, value=ev.value, part=ev.part, legato=ev.legato, aux=ev.aux, duration=clocks, chip=ev.chip))
             for i in range(1, clocks + 1):
                 at = ev.tick + ev.duration * i // clocks
-                out.append(MusicEvent("porta_step", at, note=ev.note, value=ev.value, part=ev.part, duration=i, aux=clocks))
+                out.append(MusicEvent("porta_step", at, note=ev.note, value=ev.value, part=ev.part, duration=i, aux=clocks, chip=ev.chip))
         return out
 
     for no, info in enumerate(chip_list):
@@ -457,6 +457,7 @@ def compile_song(song: Song) -> bytes:
             unlock_ssg((11, 12), cur_seq)
             vgm.write_ssg(11, ev.value & 0xFF)
             vgm.write_ssg(12, (ev.value >> 8) & 0xFF)
+            ay.env_period = ev.value & 0xFFFF  # FIXED: keep period in AyState so flush does not reset it
         elif ev.kind == "rhythm_mask":
             cs.rhythm_mask = ev.value & 0x3F
         elif ev.kind == "rhythm_vol":
